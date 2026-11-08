@@ -1,0 +1,11 @@
+# binários e dados locais (banco, certificado e chaves privadas do servidor)
+/bin/
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+# painel
+web/node_modules/
+web/dist/*
+!web/dist/.keep
