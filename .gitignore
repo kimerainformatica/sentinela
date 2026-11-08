@@ -9,3 +9,4 @@
 web/node_modules/
 web/dist/*
 !web/dist/.keep
+web/*.tsbuildinfo
