@@ -162,7 +162,7 @@ func cmdProcmon(args []string) {
 	m := procmon.Start()
 	defer m.Stop()
 	if m.Source == "etw" {
-		fmt.Println("Monitor ativo via ETW (tempo real, inclui processos de milissegundos).")
+		fmt.Printf("Monitor ativo via ETW: %s.\n", m.Mode)
 	} else {
 		fmt.Printf("Monitor ativo via verificação a cada 1 s (ETW indisponível: %s).\n", m.Reason)
 	}

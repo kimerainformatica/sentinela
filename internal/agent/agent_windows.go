@@ -328,7 +328,7 @@ func run(stop <-chan struct{}) error {
 	mon := procmon.Start()
 	defer mon.Stop()
 	if mon.Source == "etw" {
-		r.event("procmon_started", "Monitor de execuções ativo via ETW (tempo real, inclui processos de milissegundos)", map[string]any{"source": "etw"})
+		r.event("procmon_started", "Monitor de execuções ativo via ETW em tempo real: "+mon.Mode, map[string]any{"source": "etw", "mode": mon.Mode})
 	} else {
 		r.event("procmon_started", "Monitor de execuções ativo via verificação a cada 1 s (sem ETW: "+mon.Reason+"); processos muito rápidos podem não ser vistos",
 			map[string]any{"source": "poll", "reason": mon.Reason})
