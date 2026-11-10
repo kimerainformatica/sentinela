@@ -145,3 +145,29 @@ func TestEvaluateNetConnection(t *testing.T) {
 		}
 	}
 }
+
+// O próprio agente (não assinado no MVP) não deve gerar achados heurísticos,
+// mas uma detecção no VirusTotal sobre ele continua valendo.
+func TestAgentSelfIsNotFlagged(t *testing.T) {
+	now := time.Now().UTC()
+	self := &model.FileInfo{Path: `C:\Program Files\Sentinela\sentinela-agent.exe`, Exists: true, SHA256: "5e1f", Signature: "unsigned", Created: now.Add(-time.Hour)}
+	rep := &model.Report{
+		CollectedAt: now,
+		Host:        model.HostInfo{AgentSHA256: "5E1F"},
+		Autoruns: []model.Autorun{
+			{ID: "s1", Category: "Serviços", Name: "Sentinela", Command: self.Path, ImagePath: self.Path, File: self, Enabled: true},
+		},
+	}
+	if got := Evaluate(rep, Intel{}); len(got) != 0 {
+		t.Fatalf("achados sobre o próprio agente: %+v", got)
+	}
+	rep.Host.AgentSHA256 = ""
+	if got := rules(Evaluate(rep, Intel{})); got["R12"] == "" {
+		t.Fatalf("sem o hash do agente, R12 deveria disparar: %v", got)
+	}
+	rep.Host.AgentSHA256 = "5e1f"
+	intel := Intel{Hashes: map[string]HashRep{"5e1f": {Status: "known", Malicious: 9, Total: 70}}}
+	if got := rules(Evaluate(rep, intel)); got["R01"] != SevCritica || len(got) != 1 {
+		t.Fatalf("esperado só R01 crítico, veio %v", got)
+	}
+}

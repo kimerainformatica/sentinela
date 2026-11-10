@@ -2,6 +2,7 @@ package procmon
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -77,5 +78,25 @@ func TestMergeParts(t *testing.T) {
 		if a.image != `C:\Windows\System32\cmd.exe` || a.cmdline != "cmd /c echo oi" || a.parts != partCmd|partImage || !a.when.Equal(t0) {
 			t.Fatalf("merge: %+v", a)
 		}
+	}
+}
+
+func TestProcCacheEarly(t *testing.T) {
+	c := newProcCache()
+	// Só o provedor do kernel: nome curto + linha de comando.
+	c.early(10, 1, "curl.exe", `"C:\Windows\System32\curl.exe" -s https://example.com`)
+	if e, ok := c.get(10); !ok || !strings.EqualFold(e.name, "curl.exe") || !strings.HasSuffix(strings.ToLower(e.image), `\curl.exe`) {
+		t.Fatalf("early com linha de comando: %+v %v", e, ok)
+	}
+	// Não sobrescreve um registro completo do mesmo programa.
+	c.set(20, procEntry{name: "app.exe", image: `C:\App\app.exe`})
+	c.early(20, 1, "app.exe", "")
+	if e, _ := c.get(20); e.image != `C:\App\app.exe` {
+		t.Fatalf("registro completo foi sobrescrito: %+v", e)
+	}
+	// PID reutilizado por outro programa: atualiza.
+	c.early(20, 1, `C:\Windows\System32\cmd.exe`, "")
+	if e, _ := c.get(20); e.name != "cmd.exe" {
+		t.Fatalf("PID reutilizado não atualizou: %+v", e)
 	}
 }

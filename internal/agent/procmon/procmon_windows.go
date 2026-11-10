@@ -284,6 +284,9 @@ func (m *Monitor) enrich(raw <-chan rawStart, out chan<- model.ProcessEvent) {
 			if r.pid == self || r.pid <= 4 {
 				continue
 			}
+			// Registra o dono do PID já, antes da análise do arquivo: conexões
+			// de processos de vida curta (curl, PowerShell) chegam em seguida.
+			m.procs.early(r.pid, r.ppid, r.image, r.cmdline)
 			if m.need == 0 {
 				process(r)
 				continue

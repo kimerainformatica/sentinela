@@ -45,10 +45,10 @@ type FileInfo struct {
 type Autorun struct {
 	// ID estável (hash de categoria+local+nome) usado para remediação.
 	ID        string `json:"id"`
-	Category  string `json:"category"`  // Logon, Serviços, Drivers, Tarefas Agendadas, ...
-	Location  string `json:"location"`  // chave de registro, pasta ou caminho da tarefa
-	Name      string `json:"name"`      // nome do valor / serviço / tarefa / atalho
-	Command   string `json:"command"`   // linha de comando bruta
+	Category  string `json:"category"`   // Logon, Serviços, Drivers, Tarefas Agendadas, ...
+	Location  string `json:"location"`   // chave de registro, pasta ou caminho da tarefa
+	Name      string `json:"name"`       // nome do valor / serviço / tarefa / atalho
+	Command   string `json:"command"`    // linha de comando bruta
 	ImagePath string `json:"image_path"` // executável resolvido
 	Enabled   bool   `json:"enabled"`
 	User      string `json:"user,omitempty"` // para entradas por usuário (HKU / pasta Startup)
@@ -84,13 +84,16 @@ type Connection struct {
 }
 
 type HostInfo struct {
-	Hostname  string `json:"hostname"`
-	OS        string `json:"os"`
-	OSBuild   string `json:"os_build"`
-	Domain    string `json:"domain,omitempty"`
-	IPs       []string `json:"ips,omitempty"`
-	AgentVer  string `json:"agent_version"`
-	IsElevated bool  `json:"is_elevated"`
+	Hostname   string   `json:"hostname"`
+	OS         string   `json:"os"`
+	OSBuild    string   `json:"os_build"`
+	Domain     string   `json:"domain,omitempty"`
+	IPs        []string `json:"ips,omitempty"`
+	AgentVer   string   `json:"agent_version"`
+	IsElevated bool     `json:"is_elevated"`
+	// SHA-256 do executável do próprio agente: o servidor não gera
+	// achados heurísticos sobre ele (ele não é assinado no MVP).
+	AgentSHA256 string `json:"agent_sha256,omitempty"`
 }
 
 type Report struct {
@@ -178,12 +181,12 @@ type EnrollResponse struct {
 
 // Ações de remediação permitidas (allowlist). Qualquer outra é recusada.
 const (
-	ActionRescan          = "rescan"
-	ActionKillProcess     = "kill_process"
-	ActionDisableAutorun  = "disable_autorun"
-	ActionRestoreAutorun  = "restore_autorun"
-	ActionQuarantineFile  = "quarantine_file"
-	ActionRestoreFile     = "restore_file"
+	ActionRescan         = "rescan"
+	ActionKillProcess    = "kill_process"
+	ActionDisableAutorun = "disable_autorun"
+	ActionRestoreAutorun = "restore_autorun"
+	ActionQuarantineFile = "quarantine_file"
+	ActionRestoreFile    = "restore_file"
 )
 
 // Command é assinado pelo servidor. Payload contém o JSON canônico de

@@ -214,6 +214,11 @@ func (e *evaluator) add(f Finding) {
 		return
 	}
 	e.seen[f.Key] = true
+	// O próprio agente (não assinado no MVP) não gera achados heurísticos;
+	// detecções no VirusTotal (R01) continuam valendo.
+	if f.RuleID != "R01" && f.SHA256 != "" && e.rep != nil && strings.EqualFold(f.SHA256, e.rep.Host.AgentSHA256) {
+		return
+	}
 	e.out = append(e.out, f)
 }
 

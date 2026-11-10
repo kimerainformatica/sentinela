@@ -39,6 +39,29 @@ func (c *procCache) get(pid uint32) (procEntry, bool) {
 	return e, ok
 }
 
+// early registra o que o ETW já informou de uma execução, sem sobrescrever
+// um registro mais completo do mesmo PID.
+func (c *procCache) early(pid, ppid uint32, image, cmdline string) {
+	if !filepath.IsAbs(image) {
+		if img := imageFromCmdline(cmdline); img != "" {
+			image = img
+		}
+	}
+	if image == "" {
+		return
+	}
+	e := procEntry{ppid: ppid, name: filepath.Base(image)}
+	if filepath.IsAbs(image) {
+		e.image = image
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if old, ok := c.m[pid]; ok && old.image != "" && strings.EqualFold(old.name, e.name) {
+		return
+	}
+	c.m[pid] = e
+}
+
 func (c *procCache) prune(alive map[uint32]procEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -123,8 +146,47 @@ func (m *Monitor) enrichNet(raw <-chan rawNet, out chan<- model.NetEvent) {
 	seen := map[string]*seenConn{}
 	cleanup := time.NewTicker(5 * time.Minute)
 	defer cleanup.Stop()
+	retry := time.NewTicker(250 * time.Millisecond)
+	defer retry.Stop()
+
+	// Conexões cujo dono ainda não é conhecido: o processo pode ter terminado
+	// antes de o monitor de execuções registrá-lo. Esperam até ownerWait.
+	type waitingConn struct {
+		r     rawNet
+		since time.Time
+	}
+	var waiting []waitingConn
+
+	owner := func(pid uint32) (name, image string) {
+		if pid == 4 {
+			return "System", ""
+		}
+		e, ok := m.procs.get(pid)
+		if ok && e.image != "" {
+			return e.name, e.image
+		}
+		p := model.Process{PID: pid}
+		if collect.DescribeProcess(&p, users) {
+			image = p.ImagePath
+			name = filepath.Base(image)
+			m.procs.set(pid, procEntry{name: name, image: image})
+			return name, image
+		}
+		if ok {
+			return e.name, ""
+		}
+		if s, found := snapshot()[pid]; found {
+			// Sem permissão para abrir o processo (serviço, agente sem
+			// admin): o nome ainda vem da lista de processos.
+			m.procs.set(pid, s)
+			return s.name, ""
+		}
+		return "", ""
+	}
 
 	for {
+		var r rawNet
+		var name, image string
 		select {
 		case <-m.stop:
 			return
@@ -134,61 +196,74 @@ func (m *Monitor) enrichNet(raw <-chan rawNet, out chan<- model.NetEvent) {
 					delete(seen, k)
 				}
 			}
-		case r := <-raw:
-			if ignorableAddr(r.raddr) {
+			continue
+		case <-retry.C:
+			if len(waiting) == 0 {
 				continue
 			}
-			name, image := "", ""
-			if r.pid == 4 {
-				name = "System"
-			} else if e, ok := m.procs.get(r.pid); ok && e.image != "" {
-				name, image = e.name, e.image
-			} else {
-				p := model.Process{PID: r.pid}
-				if collect.DescribeProcess(&p, users) {
-					image = p.ImagePath
-					name = filepath.Base(image)
-					m.procs.set(r.pid, procEntry{name: name, image: image})
-				} else if ok {
-					name = e.name
-				} else if s, found := snapshot()[r.pid]; found {
-					// Sem permissão para abrir o processo (serviço, agente sem
-					// admin): o nome ainda vem da lista de processos.
-					name = s.name
-					m.procs.set(r.pid, s)
+			// Reenvia, na ordem, as que já têm dono ou esgotaram a espera.
+			keep := waiting[:0]
+			var ready []rawNet
+			for _, w := range waiting {
+				if n, _ := owner(w.r.pid); n != "" || time.Since(w.since) >= ownerWait {
+					ready = append(ready, w.r)
+				} else {
+					keep = append(keep, w)
 				}
 			}
-
-			// Agrupa: mesma conexão do mesmo programa vira um evento a cada 10 min.
-			who := strings.ToLower(image)
-			if who == "" {
-				who = fmt.Sprintf("pid:%d", r.pid)
+			waiting = keep
+			for _, rr := range ready {
+				n, img := owner(rr.pid)
+				m.emitNet(rr, n, img, seen, in, out)
 			}
-			port := r.rport
-			if r.dir == "entrada" {
-				port = r.lport // a porta remota de quem chega é aleatória
-			}
-			k := fmt.Sprintf("%s|%s|%s|%d", who, r.dir, r.raddr, port)
-			repeats := 0
-			if s, ok := seen[k]; ok && time.Since(s.last) < netDedupWindow {
-				s.suppressed++
-				continue
-			} else if ok {
-				repeats = s.suppressed
-			}
-			seen[k] = &seenConn{last: time.Now()}
-
-			ev := model.NetEvent{Time: r.when.UTC(), PID: r.pid, ProcessName: name, ImagePath: image,
-				Direction: r.dir, Proto: r.proto, LocalAddr: r.laddr, LocalPort: r.lport,
-				RemoteAddr: r.raddr, RemotePort: r.rport, Source: r.source, Repeats: repeats}
-			if image != "" {
-				ev.File = in.Inspect(image)
-			}
-			select {
-			case out <- ev:
-			default:
-				m.dropped.Add(1)
-			}
+			continue
+		case r = <-raw:
 		}
+		if ignorableAddr(r.raddr) {
+			continue
+		}
+		if name, image = owner(r.pid); name == "" && len(waiting) < 2000 {
+			waiting = append(waiting, waitingConn{r: r, since: time.Now()})
+			continue
+		}
+		m.emitNet(r, name, image, seen, in, out)
+	}
+}
+
+// ownerWait é quanto uma conexão espera o monitor de execuções informar
+// o dono do PID antes de ser enviada sem o nome do programa.
+const ownerWait = 3 * time.Second
+
+// emitNet agrupa repetições (mesma conexão do mesmo programa vira um evento
+// a cada 10 min), analisa o executável e envia o evento.
+func (m *Monitor) emitNet(r rawNet, name, image string, seen map[string]*seenConn, in *collect.Inspector, out chan<- model.NetEvent) {
+	who := strings.ToLower(image)
+	if who == "" {
+		who = fmt.Sprintf("pid:%d", r.pid)
+	}
+	port := r.rport
+	if r.dir == "entrada" {
+		port = r.lport // a porta remota de quem chega é aleatória
+	}
+	k := fmt.Sprintf("%s|%s|%s|%d", who, r.dir, r.raddr, port)
+	repeats := 0
+	if s, ok := seen[k]; ok && time.Since(s.last) < netDedupWindow {
+		s.suppressed++
+		return
+	} else if ok {
+		repeats = s.suppressed
+	}
+	seen[k] = &seenConn{last: time.Now()}
+
+	ev := model.NetEvent{Time: r.when.UTC(), PID: r.pid, ProcessName: name, ImagePath: image,
+		Direction: r.dir, Proto: r.proto, LocalAddr: r.laddr, LocalPort: r.lport,
+		RemoteAddr: r.raddr, RemotePort: r.rport, Source: r.source, Repeats: repeats}
+	if image != "" {
+		ev.File = in.Inspect(image)
+	}
+	select {
+	case out <- ev:
+	default:
+		m.dropped.Add(1)
 	}
 }

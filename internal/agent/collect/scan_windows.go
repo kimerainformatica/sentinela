@@ -61,6 +61,9 @@ func Host(agentVersion string) model.HostInfo {
 	h := model.HostInfo{AgentVer: agentVersion}
 	h.Hostname, _ = os.Hostname()
 	h.IsElevated = windows.GetCurrentProcessToken().IsElevated()
+	if exe, err := os.Executable(); err == nil {
+		h.AgentSHA256, _ = hashFile(exe)
+	}
 
 	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE); err == nil {
 		name, _, _ := k.GetStringValue("ProductName")
