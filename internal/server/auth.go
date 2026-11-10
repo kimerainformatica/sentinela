@@ -57,6 +57,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if req.Username != "admin" || !checkPassword(req.Password, stored) {
 		s.recordFailure("login:" + ip)
 		s.db.Audit(req.Username+"@"+ip, "login_falhou", "", "")
+		s.emitf(CatPanel, "login_failed", LvlWarn, "", "Tentativa de login falhou para %q a partir de %s", truncate(req.Username, 50), ip)
 		writeErr(w, http.StatusUnauthorized, "usuário ou senha inválidos")
 		return
 	}
@@ -68,6 +69,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 	})
 	s.db.Audit("admin@"+ip, "login", "", "")
+	s.emitf(CatPanel, "login", LvlInfo, "", "admin entrou no painel a partir de %s", ip)
 	writeJSON(w, http.StatusOK, map[string]string{"username": "admin"})
 }
 

@@ -40,13 +40,20 @@ type Config struct {
 	Interval      string `json:"interval"`
 }
 
-func DataDir() string {
+// dataDir é C:\ProgramData\Sentinela na instalação normal, ou uma pasta do
+// usuário no modo dev.
+var dataDir = func() string {
 	pd := os.Getenv("ProgramData")
 	if pd == "" {
 		pd = `C:\ProgramData`
 	}
 	return filepath.Join(pd, "Sentinela")
-}
+}()
+
+func DataDir() string { return dataDir }
+
+// hostSuffix diferencia o agente de desenvolvimento da máquina real no painel.
+var hostSuffix = ""
 
 func configPath() string { return filepath.Join(DataDir(), "config.json") }
 
@@ -143,6 +150,44 @@ func Install(server, token, fingerprint string, interval time.Duration) error {
 		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
 	}, 86400)
 	return s.Start()
+}
+
+// Dev roda o agente em primeiro plano, sem instalar serviço e sem exigir
+// administrador, guardando os dados em %LOCALAPPDATA%\Sentinela-dev. Serve
+// para desenvolver e acompanhar o agente ao vivo. Sem admin, a coleta fica
+// parcial (ex.: tarefas agendadas) e remediações em HKLM falham.
+func Dev(server, token, fingerprint string, interval time.Duration) error {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		base = os.TempDir()
+	}
+	dataDir = filepath.Join(base, "Sentinela-dev")
+	hostSuffix = " (dev)"
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return err
+	}
+	fp := NormalizeFingerprint(fingerprint)
+	cfg, err := loadConfig()
+	if err != nil || cfg.ServerURL != server || cfg.Fingerprint != fp {
+		cl, err := NewClient(server, fp)
+		if err != nil {
+			return err
+		}
+		host := collect.Host(Version)
+		res, err := cl.Enroll(token, host.Hostname+hostSuffix, host.OS)
+		if err != nil {
+			return fmt.Errorf("cadastro no servidor falhou: %w", err)
+		}
+		cfg = &Config{ServerURL: server, Fingerprint: fp, AgentID: res.AgentID, Secret: res.Secret, CommandPubKey: res.CommandPubKey}
+		fmt.Printf("Agente de desenvolvimento cadastrado (%s)\n", res.AgentID)
+	}
+	cfg.Interval = interval.String()
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath(), b, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("Modo dev: dados em %s, varredura a cada %s. Ctrl+C para parar.\n", dataDir, interval)
+	return RunForeground()
 }
 
 func copyFile(src, dst string) error {
@@ -258,7 +303,7 @@ func run(stop <-chan struct{}) error {
 		return err
 	}
 	interval, err := time.ParseDuration(cfg.Interval)
-	if err != nil || interval < time.Minute {
+	if err != nil || interval < 30*time.Second {
 		interval = DefaultInterval
 	}
 	r := &runner{
@@ -271,6 +316,13 @@ func run(stop <-chan struct{}) error {
 		}},
 	}
 	log.Printf("Sentinela %s iniciado (agente %s, servidor %s, intervalo %s)", Version, cfg.AgentID, cfg.ServerURL, interval)
+	elevated := windows.GetCurrentProcessToken().IsElevated()
+	priv := "como administrador"
+	if !elevated {
+		priv = "SEM privilégios de administrador (coleta parcial)"
+	}
+	r.event("agent_started", fmt.Sprintf("Agente %s iniciado %s; varredura a cada %s", Version, priv, interval),
+		map[string]any{"version": Version, "elevated": elevated, "interval": interval.String()})
 
 	r.scan("inicial")
 	scanT := time.NewTicker(interval)
@@ -281,6 +333,7 @@ func run(stop <-chan struct{}) error {
 		select {
 		case <-stop:
 			log.Print("agente parado")
+			r.event("agent_stopping", "Agente sendo encerrado", nil)
 			return nil
 		case <-scanT.C:
 			r.scan("agendada")
@@ -292,10 +345,28 @@ func run(stop <-chan struct{}) error {
 
 func spoolDir() string { return filepath.Join(DataDir(), "spool") }
 
+// event informa o servidor (melhor esforço: falhas só vão para o log).
+func (r *runner) event(kind, msg string, data map[string]any) {
+	if err := r.cl.Event(kind, msg, data); err != nil {
+		log.Printf("evento %s não enviado: %v", kind, err)
+	}
+}
+
+var phaseText = map[string]string{
+	"inicializacao": "Inicialização automática analisada: %d entradas (%.1f s)",
+	"processos":     "Processos analisados: %d em execução (%.1f s)",
+	"rede":          "Conexões de rede coletadas: %d (%.1f s)",
+}
+
 func (r *runner) scan(trigger string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rep, _ := collect.Scan(trigger, Version)
+	r.event("scan_started", "Varredura iniciada ("+trigger+")", map[string]any{"trigger": trigger})
+	rep, _ := collect.Scan(trigger, Version, func(phase string, n int, took time.Duration) {
+		r.event("scan_phase", fmt.Sprintf(phaseText[phase], n, took.Seconds()),
+			map[string]any{"phase": phase, "count": n, "ms": took.Milliseconds()})
+	})
+	rep.Host.Hostname += hostSuffix
 	log.Printf("varredura %s: %d autoruns, %d processos, %d conexões em %dms",
 		trigger, len(rep.Autoruns), len(rep.Processes), len(rep.Connections), rep.DurationMS)
 	data, err := GzipReport(rep)
@@ -307,7 +378,10 @@ func (r *runner) scan(trigger string) {
 	if err := r.cl.SendReportGz(data); err != nil {
 		log.Printf("envio falhou, guardando no spool: %v", err)
 		r.spool(data)
+		r.event("scan_spooled", "Falha ao enviar o relatório; guardado para reenvio: "+err.Error(), nil)
+		return
 	}
+	r.event("scan_sent", fmt.Sprintf("Relatório enviado (%d KB compactado)", len(data)/1024), map[string]any{"bytes": len(data)})
 }
 
 // spool guarda relatórios não enviados (servidor fora do ar) para reenvio.
@@ -352,10 +426,13 @@ func (r *runner) poll() {
 		p, err := r.cl.Verify(c)
 		if err != nil {
 			log.Printf("comando %s rejeitado: %v", c.ID, err)
+			r.event("command_rejected", "Comando REJEITADO pelo agente: "+err.Error(), map[string]any{"command_id": c.ID})
 			r.cl.SendResult(c.ID, model.CommandResult{OK: false, Message: "rejeitado pelo agente: " + err.Error()})
 			continue
 		}
 		log.Printf("executando comando %s: %s %v", p.ID, p.Action, p.Params)
+		r.event("command_executing", "Assinatura do comando verificada; executando "+p.Action,
+			map[string]any{"command_id": p.ID, "action": p.Action})
 
 		if p.Action == model.ActionRescan {
 			r.cl.SendResult(p.ID, model.CommandResult{OK: true, Message: "varredura iniciada"})

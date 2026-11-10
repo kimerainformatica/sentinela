@@ -2,10 +2,18 @@ import { api } from "../api";
 import { SevBadge, StatusBadge } from "../components";
 import type { Agent, Overview as OV } from "../types";
 import { ago, usePoll } from "../util";
+import { useLiveRefresh } from "../live";
 
 export default function Overview() {
   const ov = usePoll(() => api.get<OV>("/api/overview"), 10000);
   const agents = usePoll(() => api.get<Agent[]>("/api/agents"), 10000);
+  useLiveRefresh(
+    () => {
+      ov.reload();
+      agents.reload();
+    },
+    (e) => ["scan_received", "finding_opened", "finding_resolved", "status_changed", "agent_enrolled", "agent_online", "agent_offline"].includes(e.kind),
+  );
   const o = ov.data;
   const sev = o?.findings_by_severity ?? {};
 

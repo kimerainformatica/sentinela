@@ -77,6 +77,16 @@ export default function SettingsPage() {
         </div>
 
         <div className="card">
+          <h2>Ver um agente funcionando ao vivo (modo de desenvolvimento)</h2>
+          <p className="muted">
+            Roda o agente nesta máquina em primeiro plano, <strong>sem instalar serviço e sem precisar de administrador</strong>, com varredura a
+            cada 2 minutos. Abra a tela <a href="#/ao-vivo">Ao vivo</a> para acompanhar cada etapa. Sem administrador a coleta fica parcial
+            (por exemplo, sem tarefas agendadas). Ctrl+C encerra.
+          </p>
+          <pre className="box mono">{data ? `.\\bin\\sentinela-agent.exe dev -server https://127.0.0.1:${(url.split(":")[2] ?? "8443")} -token ${data.enroll_token} -fingerprint ${data.fingerprint_hex}` : ""}</pre>
+        </div>
+
+        <div className="card">
           <h2>Inteligência de ameaças</h2>
           <p>
             VirusTotal (reputação de arquivos):{" "}

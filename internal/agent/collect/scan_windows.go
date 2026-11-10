@@ -17,7 +17,13 @@ import (
 // Scan executa a varredura completa, na mesma ordem do procedimento manual:
 // inicialização automática -> processos -> conexões de rede.
 // Retorna também as entradas internas (com dados de remediação).
-func Scan(trigger, agentVersion string) (*model.Report, []Entry) {
+//
+// progress (opcional) é chamado ao fim de cada fase, para acompanhamento
+// em tempo real.
+func Scan(trigger, agentVersion string, progress func(phase string, count int, took time.Duration)) (*model.Report, []Entry) {
+	if progress == nil {
+		progress = func(string, int, time.Duration) {}
+	}
 	start := time.Now()
 	rep := &model.Report{Schema: model.SchemaVersion, CollectedAt: start.UTC(), Trigger: trigger}
 	rep.Host = Host(agentVersion)
@@ -28,17 +34,25 @@ func Scan(trigger, agentVersion string) (*model.Report, []Entry) {
 	in := NewInspector()
 	defer in.Close()
 
+	t := time.Now()
 	entries := Persistence(in, &rep.Errors)
 	for _, e := range entries {
 		rep.Autoruns = append(rep.Autoruns, e.Autorun)
 	}
-	rep.Processes = Processes(in, &rep.Errors)
+	progress("inicializacao", len(rep.Autoruns), time.Since(t))
 
+	t = time.Now()
+	rep.Processes = Processes(in, &rep.Errors)
+	progress("processos", len(rep.Processes), time.Since(t))
+
+	t = time.Now()
 	names := map[uint32]string{}
 	for _, p := range rep.Processes {
 		names[p.PID] = p.Name
 	}
 	rep.Connections = Connections(names, &rep.Errors)
+	progress("rede", len(rep.Connections), time.Since(t))
+
 	rep.DurationMS = time.Since(start).Milliseconds()
 	return rep, entries
 }

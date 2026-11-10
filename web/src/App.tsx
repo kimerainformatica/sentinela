@@ -1,10 +1,12 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, setUnauthorizedHandler } from "./api";
 import Overview from "./pages/Overview";
 import Findings from "./pages/Findings";
 import AgentDetail from "./pages/AgentDetail";
 import SettingsPage from "./pages/Settings";
 import Audit from "./pages/Audit";
+import Live from "./pages/Live";
+import { closeLive } from "./live";
 
 function useHashRoute() {
   const [hash, setHash] = useState(window.location.hash || "#/");
@@ -82,9 +84,10 @@ export default function App() {
   else if (route.startsWith("/achados")) page = <Findings />;
   else if (route.startsWith("/config")) page = <SettingsPage />;
   else if (route.startsWith("/auditoria")) page = <Audit />;
+  else if (route.startsWith("/ao-vivo")) page = <Live />;
   else page = <Overview />;
 
-  const link = (href: string, label: string, active: boolean) => (
+  const link = (href: string, label: ReactNode, active: boolean) => (
     <a href={href} className={active ? "active" : ""}>
       {label}
     </a>
@@ -97,6 +100,13 @@ export default function App() {
           <Logo /> Sentinela
         </div>
         <nav className="nav">
+          {link(
+            "#/ao-vivo",
+            <>
+              Ao vivo <span className="live-dot" />
+            </>,
+            route.startsWith("/ao-vivo"),
+          )}
           {link("#/", "Endpoints", route === "/" || !!m)}
           {link("#/achados", "Achados", route.startsWith("/achados"))}
           {link("#/auditoria", "Auditoria", route.startsWith("/auditoria"))}
@@ -107,6 +117,7 @@ export default function App() {
           className="btn sm"
           onClick={async () => {
             await api.post("/api/logout").catch(() => {});
+            closeLive();
             setAuth("out");
           }}
         >

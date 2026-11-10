@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -99,7 +101,22 @@ CREATE TABLE IF NOT EXISTS audit(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
   actor TEXT NOT NULL, action TEXT NOT NULL, agent_id TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL, -- unix ms
+  category TEXT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL,
+  agent_id TEXT NOT NULL DEFAULT '', hostname TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL, data TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS events_agent ON events(agent_id, id);
 `
+
+// Migrações para bancos criados por versões anteriores. Erros de "coluna
+// duplicada" significam que já foram aplicadas.
+var migrations = []string{
+	`ALTER TABLE hash_rep ADD COLUMN sample_path TEXT NOT NULL DEFAULT ''`,
+}
 
 type DB struct{ *sql.DB }
 
@@ -111,6 +128,11 @@ func OpenDB(path string) (*DB, error) {
 	db.SetMaxOpenConns(1) // SQLite: um escritor por vez evita "database is locked"
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return nil, fmt.Errorf("migração %q: %w", m, err)
+		}
 	}
 	return &DB{db}, nil
 }
@@ -225,19 +247,50 @@ func (d *DB) LoadIntel() (Intel, error) {
 // ---------------------------------------------------------------------------
 // Achados
 
+// SyncResult descreve o que mudou numa avaliação (usado para os eventos).
+type SyncResult struct {
+	Open       int
+	MaxSev     string
+	PrevMaxSev string
+	Opened     []Finding // novos ou reabertos
+	Resolved   []string  // títulos dos achados que deixaram de aparecer
+	NewCompromise bool   // primeira vez que a máquina teve achado crítico
+}
+
 // SyncFindings aplica o resultado da avaliação: abre achados novos,
 // atualiza os existentes e marca como "resolvido" o que não apareceu mais
 // (a "verificação posterior" do procedimento manual).
-func (d *DB) SyncFindings(agentID string, fs []Finding) (open int, maxSev string, err error) {
+func (d *DB) SyncFindings(agentID string, fs []Finding) (*SyncResult, error) {
 	tx, err := d.Begin()
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	defer tx.Rollback()
+	res := &SyncResult{}
 	t := now()
+
+	// Estado anterior
+	prev := map[string]string{} // fkey -> status
+	rows, err := tx.Query(`SELECT fkey,status,severity FROM findings WHERE agent_id=?`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var k, st, sev string
+		rows.Scan(&k, &st, &sev)
+		prev[k] = st
+		if st == "aberto" && sevRank[sev] > sevRank[res.PrevMaxSev] {
+			res.PrevMaxSev = sev
+		}
+	}
+	rows.Close()
+
 	current := map[string]bool{}
 	for _, f := range fs {
 		current[f.Key] = true
+		if st, ok := prev[f.Key]; !ok || st == "resolvido" {
+			res.Opened = append(res.Opened, f)
+		}
 		_, err = tx.Exec(`INSERT INTO findings(agent_id,fkey,rule_id,severity,title,detail,technique,object_type,object_ref,path,sha256,status,first_seen,last_seen)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,'aberto',?,?)
 			ON CONFLICT(agent_id,fkey) DO UPDATE SET
@@ -247,47 +300,53 @@ func (d *DB) SyncFindings(agentID string, fs []Finding) (open int, maxSev string
 			  resolved_at=CASE WHEN findings.status='falso_positivo' THEN findings.resolved_at ELSE 0 END`,
 			agentID, f.Key, f.RuleID, f.Severity, f.Title, f.Detail, f.Technique, f.ObjectType, f.ObjectRef, f.Path, f.SHA256, t, t)
 		if err != nil {
-			return 0, "", err
+			return nil, err
 		}
 	}
-	rows, err := tx.Query(`SELECT id,fkey FROM findings WHERE agent_id=? AND status='aberto'`, agentID)
+
+	rows, err = tx.Query(`SELECT id,fkey,title FROM findings WHERE agent_id=? AND status='aberto'`, agentID)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	var gone []int64
 	for rows.Next() {
 		var id int64
-		var k string
-		rows.Scan(&id, &k)
+		var k, title string
+		rows.Scan(&id, &k, &title)
 		if !current[k] {
 			gone = append(gone, id)
+			res.Resolved = append(res.Resolved, title)
 		}
 	}
 	rows.Close()
 	for _, id := range gone {
 		if _, err := tx.Exec(`UPDATE findings SET status='resolvido', resolved_at=? WHERE id=?`, t, id); err != nil {
-			return 0, "", err
+			return nil, err
 		}
 	}
+
 	rows, err = tx.Query(`SELECT severity FROM findings WHERE agent_id=? AND status='aberto'`, agentID)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	for rows.Next() {
 		var s string
 		rows.Scan(&s)
-		open++
-		if sevRank[s] > sevRank[maxSev] {
-			maxSev = s
+		res.Open++
+		if sevRank[s] > sevRank[res.MaxSev] {
+			res.MaxSev = s
 		}
 	}
 	rows.Close()
-	if maxSev == SevCritica {
-		if _, err := tx.Exec(`UPDATE agents SET compromised_at=? WHERE id=? AND compromised_at=0`, t, agentID); err != nil {
-			return 0, "", err
+	if res.MaxSev == SevCritica {
+		r, err := tx.Exec(`UPDATE agents SET compromised_at=? WHERE id=? AND compromised_at=0`, t, agentID)
+		if err != nil {
+			return nil, err
 		}
+		n, _ := r.RowsAffected()
+		res.NewCompromise = n > 0
 	}
-	return open, maxSev, tx.Commit()
+	return res, tx.Commit()
 }
 
 // MaxOpenSeverity é usado para o status do host na listagem.

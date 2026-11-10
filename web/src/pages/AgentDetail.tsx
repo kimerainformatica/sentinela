@@ -4,6 +4,8 @@ import { ConfirmModal, StatusBadge, useToast, type ConfirmSpec } from "../compon
 import type { Agent, Command, Finding, Scan, Snapshot } from "../types";
 import { TRIGGER_LABEL, ago, fmtTime, isMicrosoft, usePoll } from "../util";
 import { FindingCard } from "./Findings";
+import { useLiveEvents, useLiveRefresh, useLiveStatus } from "../live";
+import { LiveFeed, StatusPill } from "../LiveFeed";
 import { ActionsTab, AutorunsTab, DisableAutorunButton, KillButton, NetworkTab, ProcessesTab, QuarantineButton, type SendFn } from "./AgentTabs";
 
 type Tab = "achados" | "inicializacao" | "processos" | "rede" | "acoes";
@@ -91,6 +93,10 @@ export default function AgentDetail({ id }: { id: string }) {
     findings.reload();
     commands.reload();
   };
+  // Atualiza a tela assim que algo acontece com esta máquina.
+  useLiveRefresh(reloadAll, (e) => e.agent_id === id && e.category !== "painel" && e.kind !== "scan_phase");
+  const live = useLiveEvents({ agent: id, limit: 40 });
+  const liveStatus = useLiveStatus();
 
   const send: SendFn = (action, params, title, body, danger) =>
     setConfirm({
@@ -250,6 +256,20 @@ export default function AgentDetail({ id }: { id: string }) {
           </div>
         </div>
       )}
+
+      <div className="card" style={{ padding: 0, marginTop: 14 }}>
+        <div className="row" style={{ justifyContent: "space-between", padding: "12px 16px 4px" }}>
+          <h3 style={{ margin: 0 }}>
+            Atividade ao vivo <StatusPill status={liveStatus} />
+          </h3>
+          <a href="#/ao-vivo" className="small">
+            ver todos os eventos →
+          </a>
+        </div>
+        <div className="feed-compact">
+          <LiveFeed events={live.events.slice(0, 12)} showHost={false} empty="Nenhuma atividade registrada para esta máquina ainda." />
+        </div>
+      </div>
 
       <div className="tabs" role="tablist">
         {tabs.map(([k, label, n]) => (

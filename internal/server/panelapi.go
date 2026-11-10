@@ -43,6 +43,8 @@ func (s *Server) panelRoutes(mux *http.ServeMux) {
 	h("POST /api/settings/rotate-token", s.handleRotateToken)
 	h("POST /api/settings/password", s.handleChangePassword)
 	h("GET /api/audit", s.handleAudit)
+	h("GET /api/events", s.handleEvents)
+	h("GET /api/events/stream", s.handleEventStream)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +231,7 @@ func (s *Server) handleClearCompromise(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.db.Exec(`UPDATE agents SET compromised_at=0 WHERE id=?`, id)
 	s.db.Audit(actor(r), "reinstalacao_confirmada", id, "recomendação de formatação encerrada pelo analista")
+	s.emitf(CatAgent, "reinstall_confirmed", LvlOK, id, "%s confirmou a reinstalação limpa da máquina", actor(r))
 	w.WriteHeader(204)
 }
 
@@ -303,6 +306,11 @@ func (s *Server) handleFindingStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.db.Exec(`UPDATE findings SET status=?, resolved_at=? WHERE id=?`, req.Status, now(), id)
 	s.db.Audit(actor(r), "achado_"+req.Status, agent, title)
+	if req.Status == "falso_positivo" {
+		s.emitf(CatFinding, "finding_false_positive", LvlInfo, agent, "%s marcou como falso positivo: %s", actor(r), title)
+	} else {
+		s.emitf(CatFinding, "finding_reopened", LvlWarn, agent, "%s reabriu o achado: %s", actor(r), title)
+	}
 	w.WriteHeader(204)
 }
 
@@ -408,6 +416,16 @@ func (s *Server) handleCreateCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.db.Audit(actor(r), "comando_"+req.Action, agentID, string(params))
+	target := req.Params["path"]
+	if target == "" {
+		target = req.Params["image_path"]
+	}
+	if target != "" {
+		target = " → " + target
+	}
+	s.emit(Event{Category: CatCommand, Kind: "command_created", Level: LvlInfo, AgentID: agentID,
+		Message: fmt.Sprintf("%s enviou: %s%s (aguardando o agente buscar)", actor(r), actionText(req.Action), target),
+		Data:    map[string]any{"command_id": cmd.ID, "action": req.Action, "params": req.Params}})
 	writeJSON(w, 201, map[string]string{"id": cmd.ID})
 }
 

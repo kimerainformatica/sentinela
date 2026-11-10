@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
@@ -77,7 +78,11 @@ func (c *Client) SetCredentials(agentID, secret, pubKeyB64 string) error {
 }
 
 func (c *Client) do(method, path string, body io.Reader, gz bool, out any) error {
-	req, err := http.NewRequest(method, c.base+path, body)
+	return c.doCtx(context.Background(), method, path, body, gz, out)
+}
+
+func (c *Client) doCtx(ctx context.Context, method, path string, body io.Reader, gz bool, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return err
 	}
@@ -138,6 +143,15 @@ func (c *Client) PollCommands() ([]model.Command, error) {
 	var out []model.Command
 	err := c.do("GET", "/agent/v1/commands", nil, false, &out)
 	return out, err
+}
+
+// Event informa ao servidor o que o agente está fazendo agora (aparece na
+// tela "Ao vivo" do painel). Timeout curto: nunca atrasa a coleta.
+func (c *Client) Event(kind, message string, data map[string]any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.doCtx(ctx, "POST", "/agent/v1/events",
+		jsonBody(map[string]any{"kind": kind, "message": message, "data": data}), false, nil)
 }
 
 func (c *Client) SendResult(id string, res model.CommandResult) error {

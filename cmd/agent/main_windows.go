@@ -13,6 +13,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/windows/svc"
 
@@ -25,7 +26,9 @@ func usage() {
   sentinela-agent scan [-out relatorio.json]
   sentinela-agent install -server https://HOST:8443 -token TOKEN -fingerprint SHA256 [-interval 30m]
   sentinela-agent uninstall
-  sentinela-agent run`)
+  sentinela-agent run
+  sentinela-agent dev -token TOKEN -fingerprint SHA256 [-server URL] [-interval 2m]
+      (desenvolvimento: roda em primeiro plano, sem serviço e sem exigir admin)`)
 	os.Exit(2)
 }
 
@@ -51,6 +54,19 @@ func main() {
 		if err := agent.RunForeground(); err != nil {
 			fatal(err)
 		}
+	case "dev":
+		fs := flag.NewFlagSet("dev", flag.ExitOnError)
+		server := fs.String("server", "https://127.0.0.1:8443", "URL do servidor")
+		token := fs.String("token", "", "token de cadastro")
+		fp := fs.String("fingerprint", "", "impressão digital SHA-256 do certificado do servidor")
+		interval := fs.Duration("interval", 2*time.Minute, "intervalo entre varreduras")
+		fs.Parse(os.Args[2:])
+		if *token == "" || *fp == "" {
+			usage()
+		}
+		if err := agent.Dev(*server, *token, *fp, *interval); err != nil {
+			fatal(err)
+		}
 	default:
 		usage()
 	}
@@ -66,7 +82,9 @@ func cmdScan(args []string) {
 	out := fs.String("out", "", "grava o relatório completo em JSON")
 	fs.Parse(args)
 
-	rep, _ := collect.Scan("manual", agent.Version)
+	rep, _ := collect.Scan("manual", agent.Version, func(phase string, n int, took time.Duration) {
+		fmt.Fprintf(os.Stderr, "  %-14s %4d itens em %.1fs\n", phase, n, took.Seconds())
+	})
 	fmt.Printf("Host: %s (%s, build %s)  admin=%v  duração=%dms\n",
 		rep.Host.Hostname, rep.Host.OS, rep.Host.OSBuild, rep.Host.IsElevated, rep.DurationMS)
 

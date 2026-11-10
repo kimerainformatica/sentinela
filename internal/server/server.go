@@ -46,6 +46,12 @@ type Server struct {
 
 	loginMu       sync.Mutex
 	loginFailures map[string][]time.Time
+
+	bus             eventBus
+	rateMu          sync.Mutex
+	agentRate       map[string]rateWindow
+	offMu           sync.Mutex
+	offlineNotified map[string]bool
 }
 
 // New prepara o servidor. Na primeira execução gera certificado, chave de
@@ -59,7 +65,8 @@ func New(cfg Config) (*Server, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("banco de dados: %w", err)
 	}
-	s := &Server{cfg: cfg, db: db, intel: cfg.Intel, loginFailures: map[string][]time.Time{}}
+	s := &Server{cfg: cfg, db: db, intel: cfg.Intel, loginFailures: map[string][]time.Time{},
+		agentRate: map[string]rateWindow{}, offlineNotified: map[string]bool{}}
 
 	hosts := append([]string{"localhost", "127.0.0.1"}, cfg.Hosts...)
 	if h, err := os.Hostname(); err == nil {
@@ -139,6 +146,8 @@ func (s *Server) Run(ctx context.Context) error {
 		ErrorLog:          log.New(tlsNoiseFilter{}, "", 0),
 	}
 
+	s.checkOffline(true) // agentes já offline ao iniciar não geram alerta
+	s.emitf(CatPanel, "server_started", LvlOK, "", "Servidor iniciado em %s", s.cfg.Addr)
 	s.runIntel(ctx)
 	go s.reevaluateLoop(ctx)
 	go s.housekeeping(ctx)
@@ -238,30 +247,75 @@ func clientIP(r *http.Request) string {
 // ---------------------------------------------------------------------------
 // Detecção
 
+var triggerText = map[string]string{
+	"inicial": "inicial", "agendada": "agendada", "manual": "manual", "pos-remediacao": "de verificação pós-remediação",
+}
+
 // ingest processa um relatório recém-recebido.
 func (s *Server) ingest(agentID string, rep *model.Report) error {
 	if err := s.db.SaveSnapshot(agentID, rep); err != nil {
 		return err
 	}
-	s.queueIntel(rep)
-	open, maxSev, err := s.evaluate(agentID, rep)
+	s.emit(Event{Category: CatScan, Kind: "scan_received", Level: LvlInfo, AgentID: agentID,
+		Message: fmt.Sprintf("Varredura %s recebida: %d entradas de inicialização, %d processos, %d conexões (coleta em %.1f s)",
+			triggerText[rep.Trigger], len(rep.Autoruns), len(rep.Processes), len(rep.Connections), float64(rep.DurationMS)/1000),
+		Data: map[string]any{"trigger": rep.Trigger, "autoruns": len(rep.Autoruns), "processes": len(rep.Processes),
+			"connections": len(rep.Connections), "duration_ms": rep.DurationMS, "elevated": rep.Host.IsElevated}})
+	if n := s.queueIntel(rep); n > 0 {
+		s.emitf(CatIntel, "intel_queued", LvlInfo, agentID, "%d arquivos/IPs novos na fila de consulta de reputação", n)
+	}
+	res, err := s.evaluate(agentID, rep, "varredura")
 	if err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO scans(agent_id,received_at,trigger,autoruns,processes,connections,duration_ms,open_findings,max_severity)
 		VALUES(?,?,?,?,?,?,?,?,?)`, agentID, now(), rep.Trigger, len(rep.Autoruns), len(rep.Processes), len(rep.Connections),
-		rep.DurationMS, open, maxSev)
+		rep.DurationMS, res.Open, res.MaxSev)
+	if rep.Trigger == "pos-remediacao" {
+		lvl, msg := LvlOK, "Verificação posterior concluída: nenhum achado aberto"
+		if res.Open > 0 {
+			lvl, msg = LvlWarn, fmt.Sprintf("Verificação posterior concluída: ainda há %d achados abertos", res.Open)
+		}
+		s.emitf(CatScan, "post_check", lvl, agentID, "%s", msg)
+	}
 	return err
 }
 
-func (s *Server) evaluate(agentID string, rep *model.Report) (int, string, error) {
+var sevLevel = map[string]string{SevCritica: LvlCrit, SevAlta: LvlCrit, SevMedia: LvlWarn, SevBaixa: LvlInfo}
+var statusText = map[string]string{"comprometido": "COMPROMETIDO", "suspeito": "suspeito", "atencao": "atenção", "ok": "sem achados"}
+
+// evaluate aplica as regras e emite eventos com o que mudou. cause indica
+// o motivo (nova varredura ou reputação nova).
+func (s *Server) evaluate(agentID string, rep *model.Report, cause string) (*SyncResult, error) {
 	s.evalMu.Lock()
 	defer s.evalMu.Unlock()
 	intel, err := s.db.LoadIntel()
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
-	return s.db.SyncFindings(agentID, Evaluate(rep, intel))
+	res, err := s.db.SyncFindings(agentID, Evaluate(rep, intel))
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range res.Opened {
+		s.emit(Event{Category: CatFinding, Kind: "finding_opened", Level: sevLevel[f.Severity], AgentID: agentID,
+			Message: fmt.Sprintf("Novo achado [%s] %s: %s", f.Severity, f.RuleID, f.Title),
+			Data:    map[string]any{"rule": f.RuleID, "severity": f.Severity, "path": f.Path, "technique": f.Technique, "cause": cause}})
+	}
+	for _, t := range res.Resolved {
+		s.emitf(CatFinding, "finding_resolved", LvlOK, agentID, "Achado resolvido (não aparece mais): %s", t)
+	}
+	if before, after := HostStatus(res.PrevMaxSev), HostStatus(res.MaxSev); before != after {
+		lvl := LvlOK
+		if sevRank[res.MaxSev] > sevRank[res.PrevMaxSev] {
+			lvl = sevLevel[res.MaxSev]
+		}
+		s.emitf(CatAgent, "status_changed", lvl, agentID, "Situação da máquina: %s → %s", statusText[before], statusText[after])
+	}
+	if res.NewCompromise {
+		s.emitf(CatAgent, "compromised", LvlCrit, agentID, "Máquina marcada como comprometida: reinstalação limpa recomendada")
+	}
+	return res, nil
 }
 
 func (s *Server) markDirty() { s.dirty.Store(true) }
@@ -289,7 +343,7 @@ func (s *Server) reevaluateLoop(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			if _, _, err := s.evaluate(id, rep); err != nil {
+			if _, err := s.evaluate(id, rep, "reputacao"); err != nil {
 				log.Printf("reavaliação %s: %v", id, err)
 			}
 		}
@@ -297,7 +351,7 @@ func (s *Server) reevaluateLoop(ctx context.Context) {
 }
 
 func (s *Server) housekeeping(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -306,8 +360,14 @@ func (s *Server) housekeeping(ctx context.Context) {
 		case <-t.C:
 		}
 		n := now()
+		s.checkOffline(false)
 		s.db.Exec(`DELETE FROM sessions WHERE expires_at < ?`, n)
-		s.db.Exec(`UPDATE commands SET status='expirado', finished_at=? WHERE status IN ('pendente','enviado') AND expires_at < ?`, n, n)
+		if r, err := s.db.Exec(`UPDATE commands SET status='expirado', finished_at=? WHERE status IN ('pendente','enviado') AND expires_at < ?`, n, n); err == nil {
+			if k, _ := r.RowsAffected(); k > 0 {
+				s.emitf(CatCommand, "command_expired", LvlWarn, "", "%d comandos expiraram sem resposta do agente", k)
+			}
+		}
 		s.db.Exec(`DELETE FROM scans WHERE received_at < ?`, n-90*86400)
+		s.db.Exec(`DELETE FROM events WHERE id <= (SELECT max(id) FROM events) - ?`, maxStoredEvents)
 	}
 }
