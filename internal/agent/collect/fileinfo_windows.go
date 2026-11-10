@@ -103,15 +103,25 @@ func (in *Inspector) Inspect(path string) *model.FileInfo {
 	}
 	key := strings.ToLower(path)
 	in.mu.Lock()
-	if fi, ok := in.cache[key]; ok {
-		in.mu.Unlock()
-		return fi
-	}
+	fi, ok := in.cache[key]
 	in.mu.Unlock()
+	if ok {
+		// O monitor em tempo real usa o mesmo Inspector por muito tempo:
+		// se o arquivo foi trocado (tamanho/data), analisa de novo.
+		st, err := os.Stat(path)
+		same := (err != nil && !fi.Exists) ||
+			(err == nil && fi.Exists && st.Size() == fi.Size && st.ModTime().UTC().Equal(fi.Modified))
+		if same {
+			return fi
+		}
+	}
 
-	fi := in.inspect(path)
+	fi = in.inspect(path)
 
 	in.mu.Lock()
+	if len(in.cache) > 20000 { // limite de memória em execução longa
+		in.cache = map[string]*model.FileInfo{}
+	}
 	in.cache[key] = fi
 	in.mu.Unlock()
 	return fi

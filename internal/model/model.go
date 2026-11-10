@@ -106,6 +106,39 @@ type Report struct {
 }
 
 // ---------------------------------------------------------------------------
+// Telemetria em tempo real
+
+// ProcessEvent é a execução de um programa, capturada no momento em que
+// acontece (ETW ou verificação a cada segundo).
+type ProcessEvent struct {
+	Time        time.Time `json:"time"`
+	PID         uint32    `json:"pid"`
+	PPID        uint32    `json:"ppid"`
+	Name        string    `json:"name"`
+	ImagePath   string    `json:"image_path,omitempty"`
+	CommandLine string    `json:"command_line,omitempty"`
+	User        string    `json:"user,omitempty"`
+	ParentName  string    `json:"parent_name,omitempty"`
+	ParentImage string    `json:"parent_image,omitempty"`
+	File        *FileInfo `json:"file,omitempty"`
+	// etw = evento do kernel (captura até processos de milissegundos);
+	// poll = verificação periódica (modo sem administrador).
+	Source string `json:"source"`
+	// true quando o processo já tinha terminado ao ser analisado (só o
+	// caminho veio do evento; linha de comando e usuário ficam vazios).
+	Exited bool `json:"exited,omitempty"`
+	// true quando o processo existe mas o agente não tem permissão para
+	// abri-lo (processo protegido ou de outro usuário, agente sem admin).
+	Restricted bool `json:"restricted,omitempty"`
+}
+
+type TelemetryBatch struct {
+	Processes []ProcessEvent `json:"processes"`
+	// Eventos descartados no agente por excesso de volume.
+	Dropped int `json:"dropped,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
 // Enrollment e comandos
 
 type EnrollRequest struct {

@@ -5,7 +5,7 @@ import { useLiveEvents, useLiveRefresh, useLiveStatus, useTick, type Category, t
 import type { Agent, Overview } from "../types";
 import { usePoll } from "../util";
 
-const CATS: Category[] = ["agente", "varredura", "achado", "inteligencia", "comando", "painel"];
+const CATS: Category[] = ["agente", "processo", "varredura", "achado", "inteligencia", "comando", "painel"];
 
 /** Tela para acompanhar, em tempo real, tudo o que o sistema está fazendo. */
 export default function Live() {
@@ -14,6 +14,7 @@ export default function Live() {
   const [paused, setPaused] = useState(false);
   const [cats, setCats] = useState<Set<Category>>(new Set(CATS));
   const [onlyAlerts, setOnlyAlerts] = useState(false);
+  const [hideMs, setHideMs] = useState(true);
   const [agent, setAgent] = useState("");
   const [q, setQ] = useState("");
 
@@ -32,6 +33,7 @@ export default function Live() {
   const shown = events.filter(
     (e) =>
       cats.has(e.category) &&
+      !(hideMs && e.category === "processo" && e.data?.microsoft === true) &&
       (!onlyAlerts || e.level === "alerta" || e.level === "critico") &&
       (!agent || e.agent_id === agent) &&
       (!q || e.message.toLowerCase().includes(q.toLowerCase()) || (e.hostname ?? "").toLowerCase().includes(q.toLowerCase())),
@@ -117,6 +119,10 @@ export default function Live() {
             <label className="check">
               <input type="checkbox" checked={onlyAlerts} onChange={(e) => setOnlyAlerts(e.target.checked)} />
               Só alertas e críticos
+            </label>
+            <label className="check" title="Esconde execuções de programas assinados pela Microsoft (svchost, conhost...)">
+              <input type="checkbox" checked={hideMs} onChange={(e) => setHideMs(e.target.checked)} />
+              Ocultar execuções da Microsoft
             </label>
             <span className="small muted">
               {shown.length} de {events.length} eventos

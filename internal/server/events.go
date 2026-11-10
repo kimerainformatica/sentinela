@@ -220,6 +220,7 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 
 var agentEventKinds = map[string]string{
 	"agent_started":     LvlOK,
+	"procmon_started":   LvlInfo,
 	"agent_stopping":    LvlWarn,
 	"scan_started":      LvlInfo,
 	"scan_phase":        LvlInfo,

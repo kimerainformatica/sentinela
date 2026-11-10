@@ -459,6 +459,42 @@ func (e *evaluator) connection(c *model.Connection, procs map[uint32]*model.Proc
 	}
 }
 
+// RealtimePrefix marca achados vindos de execuções em tempo real. Eles não
+// são "resolvidos" automaticamente pela varredura seguinte (o processo pode
+// ter durado segundos); o analista os encerra no painel.
+const RealtimePrefix = "rt|"
+
+// EvaluateExecution aplica as regras de processo a uma execução capturada
+// em tempo real (o pai vem junto, permitindo a regra Office -> script mesmo
+// para processos que duram milissegundos).
+func EvaluateExecution(ev *model.ProcessEvent, intel Intel) []Finding {
+	p := model.Process{PID: ev.PID, PPID: ev.PPID, Name: ev.Name, ImagePath: ev.ImagePath,
+		CommandLine: ev.CommandLine, User: ev.User, File: ev.File}
+	parent := &model.Process{PID: ev.PPID, Name: ev.ParentName, ImagePath: ev.ParentImage}
+	e := &evaluator{rep: &model.Report{CollectedAt: ev.Time}, intel: intel, seen: map[string]bool{}}
+	e.process(&p, map[uint32]*model.Process{ev.PPID: parent})
+
+	// R17: programa sem assinatura executado de pasta gravável pelo usuário
+	// (Downloads, AppData, Temp...). Típico do primeiro estágio de um Trojan.
+	if unsignedFile(p.File) && userWritable(p.ImagePath) {
+		by := ""
+		if ev.ParentName != "" {
+			by = " iniciado por " + ev.ParentName
+		}
+		e.add(Finding{RuleID: "R17", Severity: SevMedia, Technique: "T1204.002",
+			Title:  "Programa sem assinatura executado de pasta do usuário",
+			Detail: fmt.Sprintf("%s (PID %d)%s. Linha de comando: %s. %s", p.ImagePath, p.PID, by, p.CommandLine, describe(p.File)),
+			ObjectType: "process", ObjectRef: procRef(&p), Path: p.ImagePath, SHA256: shaOf(p.File)})
+	}
+
+	when := ev.Time.Local().Format("02/01 15:04:05")
+	for i := range e.out {
+		e.out[i].Key = RealtimePrefix + e.out[i].Key
+		e.out[i].Detail = "Execução capturada em tempo real em " + when + ". " + e.out[i].Detail
+	}
+	return e.out
+}
+
 // HostStatus resume a situação do endpoint pela maior severidade aberta.
 func HostStatus(maxSev string) string {
 	switch maxSev {

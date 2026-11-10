@@ -297,6 +297,12 @@ func (s *Server) evaluate(agentID string, rep *model.Report, cause string) (*Syn
 	if err != nil {
 		return nil, err
 	}
+	s.emitSync(agentID, res, cause)
+	return res, nil
+}
+
+// emitSync transforma o resultado de uma avaliação em eventos ao vivo.
+func (s *Server) emitSync(agentID string, res *SyncResult, cause string) {
 	for _, f := range res.Opened {
 		s.emit(Event{Category: CatFinding, Kind: "finding_opened", Level: sevLevel[f.Severity], AgentID: agentID,
 			Message: fmt.Sprintf("Novo achado [%s] %s: %s", f.Severity, f.RuleID, f.Title),
@@ -315,7 +321,6 @@ func (s *Server) evaluate(agentID string, rep *model.Report, cause string) (*Syn
 	if res.NewCompromise {
 		s.emitf(CatAgent, "compromised", LvlCrit, agentID, "Máquina marcada como comprometida: reinstalação limpa recomendada")
 	}
-	return res, nil
 }
 
 func (s *Server) markDirty() { s.dirty.Store(true) }
@@ -334,6 +339,7 @@ func (s *Server) reevaluateLoop(ctx context.Context) {
 		if !s.dirty.Swap(false) {
 			continue
 		}
+		s.reevaluateExecutions()
 		ids, err := s.db.SnapshotAgents()
 		if err != nil {
 			continue
@@ -369,5 +375,6 @@ func (s *Server) housekeeping(ctx context.Context) {
 		}
 		s.db.Exec(`DELETE FROM scans WHERE received_at < ?`, n-90*86400)
 		s.db.Exec(`DELETE FROM events WHERE id <= (SELECT max(id) FROM events) - ?`, maxStoredEvents)
+		s.db.Exec(`DELETE FROM proc_events WHERE id <= (SELECT max(id) FROM proc_events) - ?`, maxStoredProcEvts)
 	}
 }

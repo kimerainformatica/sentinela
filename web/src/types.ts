@@ -172,3 +172,25 @@ export interface AuditEntry {
   hostname: string;
   detail: string;
 }
+
+/** Execução de programa capturada em tempo real. */
+export interface Execution {
+  id: number;
+  ts: number; // ms
+  pid: number;
+  ppid: number;
+  name: string;
+  image: string;
+  command_line: string;
+  user: string;
+  parent_name: string;
+  parent_image: string;
+  sha256: string;
+  signature: "" | "valid" | "unsigned" | "invalid" | "error";
+  signer: string;
+  company: string;
+  source: "etw" | "poll";
+  exited: boolean;
+  restricted: boolean;
+  vt: HashRep | { status: ""; malicious: number; total: number; label: string; suspicious: number };
+}

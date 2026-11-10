@@ -3,6 +3,7 @@ import type { Category, LiveEvent, LiveStatus } from "./live";
 
 export const CAT_LABEL: Record<Category, string> = {
   agente: "Agente",
+  processo: "Execução",
   varredura: "Varredura",
   achado: "Achado",
   inteligencia: "Reputação",
@@ -12,6 +13,7 @@ export const CAT_LABEL: Record<Category, string> = {
 
 export const CAT_ICON: Record<Category, string> = {
   agente: "◉",
+  processo: "▶",
   varredura: "⟳",
   achado: "⚑",
   inteligencia: "◈",

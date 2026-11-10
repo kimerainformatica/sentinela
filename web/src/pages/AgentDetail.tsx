@@ -6,9 +6,9 @@ import { TRIGGER_LABEL, ago, fmtTime, isMicrosoft, usePoll } from "../util";
 import { FindingCard } from "./Findings";
 import { useLiveEvents, useLiveRefresh, useLiveStatus } from "../live";
 import { LiveFeed, StatusPill } from "../LiveFeed";
-import { ActionsTab, AutorunsTab, DisableAutorunButton, KillButton, NetworkTab, ProcessesTab, QuarantineButton, type SendFn } from "./AgentTabs";
+import { ActionsTab, AutorunsTab, DisableAutorunButton, ExecutionsTab, KillButton, NetworkTab, ProcessesTab, QuarantineButton, type SendFn } from "./AgentTabs";
 
-type Tab = "achados" | "inicializacao" | "processos" | "rede" | "acoes";
+type Tab = "achados" | "execucoes" | "inicializacao" | "processos" | "rede" | "acoes";
 
 type StepState = "done" | "warn" | "bad" | "todo";
 interface Step {
@@ -154,6 +154,7 @@ export default function AgentDetail({ id }: { id: string }) {
 
   const tabs: [Tab, string, number | null][] = [
     ["achados", "Achados", open.length],
+    ["execucoes", "Execuções em tempo real", null],
     ["inicializacao", "Inicialização automática", autoruns.length],
     ["processos", "Processos", procs.length],
     ["rede", "Conexões de rede", (s?.report.connections ?? []).filter((c) => c.state === "ESTABLISHED").length],
@@ -294,6 +295,7 @@ export default function AgentDetail({ id }: { id: string }) {
           </div>
         </>
       )}
+      {tab === "execucoes" && <ExecutionsTab agentId={id} findings={allF} send={send} />}
       {s && tab === "inicializacao" && <AutorunsTab snap={s} findings={allF} send={send} />}
       {s && tab === "processos" && <ProcessesTab snap={s} findings={allF} send={send} />}
       {s && tab === "rede" && <NetworkTab snap={s} findings={allF} send={send} />}

@@ -27,6 +27,7 @@ func (s *Server) agentRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /agent/v1/commands", s.agentAuth(http.HandlerFunc(s.handlePollCommands)))
 	mux.Handle("POST /agent/v1/commands/{id}/result", s.agentAuth(http.HandlerFunc(s.handleCommandResult)))
 	mux.Handle("POST /agent/v1/events", s.agentAuth(http.HandlerFunc(s.handleAgentEvent)))
+	mux.Handle("POST /agent/v1/telemetry", s.agentAuth(http.HandlerFunc(s.handleTelemetry)))
 }
 
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {

@@ -60,6 +60,35 @@ todas as máquinas, com registro de cada ação.
 | R14 | alta | Word/Excel/Outlook/PDF abrindo PowerShell, cmd, wscript… (macro maliciosa) | T1204.002 |
 | R15 | alta | Processo com linha de comando suspeita | T1059 |
 | R16 | média | Programa sem assinatura em pasta do usuário aguardando conexões (possível backdoor) | T1571 |
+| R17 | média | *(tempo real)* Programa sem assinatura **executado** de pasta do usuário (Downloads, Temp, AppData…) | T1204.002 |
+
+As regras de processo (R01, R04, R05, R14, R15, R17) também rodam **no instante da execução** (veja abaixo),
+então pegam até um PowerShell que dura meio segundo. Esses achados ficam abertos até o analista marcá-los como
+resolvidos, já que o processo pode não existir mais na varredura seguinte.
+
+## Execuções em tempo real
+
+Além das varreduras periódicas, o agente captura **cada programa no momento em que é aberto**, com linha de
+comando, usuário, processo pai, assinatura e hash. Tudo aparece na tela **Ao vivo** e na aba
+**Execuções em tempo real** de cada máquina.
+
+| Agente rodando como | Fonte | Cobertura |
+|---|---|---|
+| Serviço (SYSTEM) / administrador | **ETW** (`Microsoft-Windows-Kernel-Process`) | Todos os processos, inclusive os de milissegundos |
+| Usuário comum (modo `dev`) | Verificação a cada 1 s | Processos que ficam abertos por ~1 s ou mais |
+
+Diagnóstico local: `sentinela-agent.exe procmon -for 30s` mostra as execuções no terminal e informa qual fonte está ativa.
+
+## Ver o sistema funcionando (desenvolvimento)
+
+```powershell
+.\bin\sentinela-server.exe -addr 127.0.0.1:8443 -data .\data
+# em outro terminal (o comando completo aparece em "Instalação e ajustes" no painel):
+.\bin\sentinela-agent.exe dev -token <TOKEN> -fingerprint <SHA256>
+```
+
+O modo `dev` roda o agente em primeiro plano, **sem instalar serviço e sem exigir administrador**, com varredura
+a cada 2 minutos. Abra a tela **Ao vivo** do painel para acompanhar cada etapa.
 
 ## Compilar
 
@@ -114,7 +143,7 @@ O agente roda como SYSTEM, então o canal de comandos é o alvo mais valioso. Po
 
 ## Limitações conhecidas (próximos passos)
 
-1. **Coleta por varredura periódica**, não em tempo real. Um processo que roda e termina entre duas varreduras não é visto. Próximo passo: ETW (`Microsoft-Windows-Kernel-Process`, `-Kernel-Network`) em modo usuário, sem driver.
+1. **Tempo real só para execução de processos.** Persistência, arquivos e conexões de rede ainda são vistos apenas nas varreduras periódicas. Próximo passo: ETW de rede (`Microsoft-Windows-Kernel-Network`) e de registro. Sem administrador, processos que duram menos de ~1 s podem escapar.
 2. **Persistência ainda não coberta**: assinaturas WMI, extensões do Explorer, COM hijacking, hives de usuários deslogados.
 3. **Um único usuário (admin)**. Próximo passo: múltiplos usuários com papéis (leitura / analista / admin).
 4. **SQLite** atende algumas dezenas de máquinas com snapshots. Com telemetria em tempo real (item 1), migrar os eventos para ClickHouse.

@@ -110,12 +110,27 @@ CREATE TABLE IF NOT EXISTS events(
   message TEXT NOT NULL, data TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS events_agent ON events(agent_id, id);
+
+-- Execuções de programas capturadas em tempo real.
+CREATE TABLE IF NOT EXISTS proc_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  ts INTEGER NOT NULL, -- unix ms
+  pid INTEGER NOT NULL, ppid INTEGER NOT NULL,
+  name TEXT NOT NULL, image TEXT NOT NULL, cmdline TEXT NOT NULL, user TEXT NOT NULL,
+  parent_name TEXT NOT NULL, parent_image TEXT NOT NULL,
+  sha256 TEXT NOT NULL, signature TEXT NOT NULL, signer TEXT NOT NULL, company TEXT NOT NULL,
+  source TEXT NOT NULL, exited INTEGER NOT NULL, restricted INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS proc_events_agent ON proc_events(agent_id, id);
+CREATE INDEX IF NOT EXISTS proc_events_sha ON proc_events(sha256);
 `
 
 // Migrações para bancos criados por versões anteriores. Erros de "coluna
 // duplicada" significam que já foram aplicadas.
 var migrations = []string{
 	`ALTER TABLE hash_rep ADD COLUMN sample_path TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE proc_events ADD COLUMN restricted INTEGER NOT NULL DEFAULT 0`,
 }
 
 type DB struct{ *sql.DB }
@@ -304,7 +319,8 @@ func (d *DB) SyncFindings(agentID string, fs []Finding) (*SyncResult, error) {
 		}
 	}
 
-	rows, err = tx.Query(`SELECT id,fkey,title FROM findings WHERE agent_id=? AND status='aberto'`, agentID)
+	// Achados de tempo real (rt|) não são resolvidos pela varredura.
+	rows, err = tx.Query(`SELECT id,fkey,title FROM findings WHERE agent_id=? AND status='aberto' AND fkey NOT LIKE 'rt|%'`, agentID)
 	if err != nil {
 		return nil, err
 	}

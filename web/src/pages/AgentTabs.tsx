@@ -1,7 +1,10 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { FileDetails, SigCell, VtCell } from "../components";
-import type { Autorun, Command, FileInfo, Finding, Process, Scan, Snapshot } from "../types";
-import { ACTION_LABEL, TRIGGER_LABEL, fmtTime, isMicrosoft } from "../util";
+import type { Autorun, Command, Execution, FileInfo, Finding, Process, Scan, Snapshot } from "../types";
+import { ACTION_LABEL, TRIGGER_LABEL, fmtTime, isMicrosoft, usePoll, vtLink } from "../util";
+import { api } from "../api";
+import { useLiveRefresh } from "../live";
+import { fmtClock } from "../LiveFeed";
 
 /** Envia um comando ao agente (com confirmação). */
 export type SendFn = (action: string, params: Record<string, string>, title: string, body: string, danger?: boolean) => void;
@@ -442,5 +445,104 @@ export function ActionsTab({ commands, scans, send, autoruns }: { commands: Comm
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Execuções em tempo real
+
+const SIG_TXT: Record<string, string> = { valid: "Assinado", unsigned: "Sem assinatura", invalid: "Assinatura inválida", error: "Não verificado" };
+
+export function ExecutionsTab({ agentId, findings, send }: { agentId: string; findings: Finding[]; send: SendFn }) {
+  const [q, setQ] = useState("");
+  const [hideMs, setHideMs] = useState(true);
+  const { data, reload } = usePoll(() => api.get<Execution[]>(`/api/agents/${agentId}/executions?limit=500&q=${encodeURIComponent(q)}`), 15000, [agentId, q]);
+  useLiveRefresh(reload, (e) => e.agent_id === agentId && e.kind === "process_started", 1200);
+  const flagged = useMemo(
+    () => new Set(findings.filter((f) => f.status === "aberto" && f.path).map((f) => f.path.toLowerCase())),
+    [findings],
+  );
+  const all = data ?? [];
+  const rows = all.filter((e) => !hideMs || flagged.has(e.image.toLowerCase()) || !(e.signature === "valid" && e.signer.startsWith("Microsoft")));
+  const etw = all.some((e) => e.source === "etw");
+
+  return (
+    <>
+      <div className="row" style={{ marginBottom: 12 }}>
+        <input type="text" placeholder="Buscar programa, linha de comando ou pai…" value={q} onChange={(e) => setQ(e.target.value)} style={{ minWidth: 300 }} />
+        <label className="check">
+          <input type="checkbox" checked={hideMs} onChange={(e) => setHideMs(e.target.checked)} />
+          Ocultar programas assinados pela Microsoft
+        </label>
+        <span className="small muted">
+          {rows.length} de {all.length} execuções ·{" "}
+          {all.length === 0 ? "aguardando" : etw ? "captura via ETW (tempo real)" : "captura a cada 1 s (agente sem administrador: processos muito rápidos podem escapar)"}
+        </span>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Quando</th>
+              <th>Programa</th>
+              <th>Iniciado por</th>
+              <th>Usuário</th>
+              <th>Assinatura</th>
+              <th>VirusTotal</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((e) => {
+              const f: FileInfo | undefined = e.sha256 ? { path: e.image, exists: true, sha256: e.sha256, signature: e.signature || undefined, signer: e.signer } : undefined;
+              const vt = e.vt.status === "known" ? e.vt : null;
+              return (
+                <tr key={e.id} className={flagged.has(e.image.toLowerCase()) ? "hl" : ""}>
+                  <td className="small mono" style={{ whiteSpace: "nowrap" }}>
+                    {fmtClock(e.ts)}
+                    <div className="muted">{new Date(e.ts).toLocaleDateString("pt-BR")}</div>
+                  </td>
+                  <td style={{ maxWidth: 480 }}>
+                    <strong>{e.name}</strong> <span className="small muted mono">PID {e.pid}</span>
+                    {e.exited && <span className="badge st-expirado" style={{ marginLeft: 6 }}>encerrou rápido</span>}
+                    {e.restricted && <span className="badge st-expirado" style={{ marginLeft: 6 }} title="Processo protegido ou agente sem administrador">sem permissão</span>}
+                    <div className="small mono break">{e.command_line || e.image}</div>
+                  </td>
+                  <td className="small">
+                    {e.parent_name || <span className="muted">PID {e.ppid}</span>}
+                    {e.parent_image && <div className="muted mono break">{e.parent_image}</div>}
+                  </td>
+                  <td className="small">{e.user || "—"}</td>
+                  <td>
+                    {e.signature ? <span className={`badge sig-${e.signature}`}>{SIG_TXT[e.signature]}</span> : <span className="muted">—</span>}
+                    {e.signer && <div className="small">{e.signer}</div>}
+                  </td>
+                  <td className="small">
+                    {vt ? (
+                      <span className={`badge ${vt.malicious >= 5 ? "sev-critica" : vt.malicious >= 2 ? "sev-alta" : vt.malicious ? "sev-media" : "st-ok"}`} title={vt.label}>
+                        {vt.malicious}/{vt.total}
+                      </span>
+                    ) : (
+                      <span className="muted">{e.vt.status === "pending" ? "na fila" : e.vt.status === "unknown" ? "desconhecido" : "—"}</span>
+                    )}
+                    {e.sha256 && (
+                      <>
+                        {" "}
+                        <a href={vtLink(e.sha256)} target="_blank" rel="noreferrer noopener">
+                          abrir ↗
+                        </a>
+                      </>
+                    )}
+                  </td>
+                  <td>
+                    <QuarantineButton f={f} send={send} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }

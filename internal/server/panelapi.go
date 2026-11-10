@@ -34,6 +34,7 @@ func (s *Server) panelRoutes(mux *http.ServeMux) {
 	h("GET /api/agents/{id}", s.handleAgent)
 	h("DELETE /api/agents/{id}", s.handleDeleteAgent)
 	h("GET /api/agents/{id}/snapshot", s.handleSnapshot)
+	h("GET /api/agents/{id}/executions", s.handleExecutions)
 	h("GET /api/agents/{id}/commands", s.handleListCommands)
 	h("POST /api/agents/{id}/commands", s.handleCreateCommand)
 	h("POST /api/agents/{id}/clear-compromise", s.handleClearCompromise)
@@ -294,7 +295,7 @@ func (s *Server) handleFindingStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if req.Status != "aberto" && req.Status != "falso_positivo" {
+	if req.Status != "aberto" && req.Status != "falso_positivo" && req.Status != "resolvido" {
 		writeErr(w, 400, "status inválido")
 		return
 	}
@@ -306,9 +307,12 @@ func (s *Server) handleFindingStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.db.Exec(`UPDATE findings SET status=?, resolved_at=? WHERE id=?`, req.Status, now(), id)
 	s.db.Audit(actor(r), "achado_"+req.Status, agent, title)
-	if req.Status == "falso_positivo" {
+	switch req.Status {
+	case "falso_positivo":
 		s.emitf(CatFinding, "finding_false_positive", LvlInfo, agent, "%s marcou como falso positivo: %s", actor(r), title)
-	} else {
+	case "resolvido":
+		s.emitf(CatFinding, "finding_resolved", LvlOK, agent, "%s marcou como resolvido: %s", actor(r), title)
+	default:
 		s.emitf(CatFinding, "finding_reopened", LvlWarn, agent, "%s reabriu o achado: %s", actor(r), title)
 	}
 	w.WriteHeader(204)

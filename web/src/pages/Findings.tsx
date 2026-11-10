@@ -56,9 +56,18 @@ export function FindingCard({ f, showHost, actions, onChange }: { f: Finding; sh
       <div className="row" style={{ marginTop: 10 }}>
         {actions}
         {f.status === "aberto" && (
-          <button className="btn sm" onClick={() => setStatus("falso_positivo")}>
-            Marcar como falso positivo
-          </button>
+          <>
+            <button
+              className="btn sm"
+              title="Use depois de tratar o problema. Achados de varredura voltam a abrir se o item ainda existir na próxima varredura."
+              onClick={() => setStatus("resolvido")}
+            >
+              Marcar como resolvido
+            </button>
+            <button className="btn sm" onClick={() => setStatus("falso_positivo")}>
+              Marcar como falso positivo
+            </button>
+          </>
         )}
         {f.status === "falso_positivo" && (
           <button className="btn sm" onClick={() => setStatus("aberto")}>

@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"sentinela/internal/agent"
 	"sentinela/internal/agent/collect"
+	"sentinela/internal/agent/procmon"
 )
 
 func usage() {
@@ -27,6 +29,7 @@ func usage() {
   sentinela-agent install -server https://HOST:8443 -token TOKEN -fingerprint SHA256 [-interval 30m]
   sentinela-agent uninstall
   sentinela-agent run
+  sentinela-agent procmon [-for 30s]   mostra as execuções de programas em tempo real
   sentinela-agent dev -token TOKEN -fingerprint SHA256 [-server URL] [-interval 2m]
       (desenvolvimento: roda em primeiro plano, sem serviço e sem exigir admin)`)
 	os.Exit(2)
@@ -54,6 +57,8 @@ func main() {
 		if err := agent.RunForeground(); err != nil {
 			fatal(err)
 		}
+	case "procmon":
+		cmdProcmon(os.Args[2:])
 	case "dev":
 		fs := flag.NewFlagSet("dev", flag.ExitOnError)
 		server := fs.String("server", "https://127.0.0.1:8443", "URL do servidor")
@@ -146,6 +151,57 @@ func cmdScan(args []string) {
 		}
 		fmt.Println("\nRelatório salvo em", *out)
 	}
+}
+
+// cmdProcmon mostra as execuções de programas em tempo real (diagnóstico).
+func cmdProcmon(args []string) {
+	fs := flag.NewFlagSet("procmon", flag.ExitOnError)
+	dur := fs.Duration("for", 0, "encerra depois deste tempo (0 = até Ctrl+C)")
+	fs.Parse(args)
+
+	m := procmon.Start()
+	defer m.Stop()
+	if m.Source == "etw" {
+		fmt.Println("Monitor ativo via ETW (tempo real, inclui processos de milissegundos).")
+	} else {
+		fmt.Printf("Monitor ativo via verificação a cada 1 s (ETW indisponível: %s).\n", m.Reason)
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	var timeout <-chan time.Time
+	if *dur > 0 {
+		timeout = time.After(*dur)
+	}
+	for {
+		select {
+		case <-sig:
+			return
+		case <-timeout:
+			return
+		case e := <-m.Events:
+			sig := "-"
+			if e.File != nil {
+				sig = e.File.Signature
+				if e.File.Signer != "" {
+					sig += " (" + e.File.Signer + ")"
+				}
+			}
+			exited := ""
+			if e.Exited {
+				exited = " [já terminou]"
+			}
+			fmt.Printf("%s %-5s PID %-6d %s ← %s%s\n    %s\n    assinatura: %s\n",
+				e.Time.Local().Format("15:04:05.000"), e.Source, e.PID, e.Name, e.ParentName, exited,
+				firstNonEmpty(e.CommandLine, e.ImagePath), sig)
+		}
+	}
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 func cmdInstall(args []string) {

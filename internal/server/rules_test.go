@@ -67,6 +67,32 @@ func TestEvaluateTrojanScenario(t *testing.T) {
 	}
 }
 
+func TestEvaluateExecution(t *testing.T) {
+	ms := &model.FileInfo{Path: `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, Exists: true, Signature: "valid", Signer: "Microsoft Windows"}
+	// Word abrindo PowerShell codificado por meio segundo: só o tempo real vê.
+	ev := &model.ProcessEvent{Time: time.Now(), PID: 900, PPID: 800, Name: "powershell.exe", ImagePath: ms.Path,
+		CommandLine: "powershell -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQA", File: ms,
+		ParentName: "WINWORD.EXE", ParentImage: `C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE`}
+	got := rules(EvaluateExecution(ev, Intel{}))
+	if got["R14"] != SevAlta || got["R15"] != SevAlta || len(got) != 2 {
+		t.Fatalf("obtido %v", got)
+	}
+
+	dl := &model.FileInfo{Path: `C:\Users\ana\Downloads\boleto_2026.exe`, Exists: true, SHA256: "cc", Signature: "unsigned"}
+	ev = &model.ProcessEvent{Time: time.Now(), PID: 1, PPID: 2, Name: "boleto_2026.exe", ImagePath: dl.Path, File: dl, ParentName: "explorer.exe"}
+	fs := EvaluateExecution(ev, Intel{})
+	if len(fs) != 1 || fs[0].RuleID != "R17" || fs[0].Key[:3] != RealtimePrefix {
+		t.Fatalf("obtido %+v", fs)
+	}
+
+	// Programa assinado comum não gera nada
+	ok := &model.FileInfo{Path: `C:\Users\ana\AppData\Local\Discord\app\Discord.exe`, Exists: true, Signature: "valid", Signer: "Discord Inc."}
+	ev = &model.ProcessEvent{Time: time.Now(), PID: 3, PPID: 4, Name: "Discord.exe", ImagePath: ok.Path, File: ok, ParentName: "explorer.exe"}
+	if fs := EvaluateExecution(ev, Intel{}); len(fs) != 0 {
+		t.Fatalf("falso positivo: %+v", fs)
+	}
+}
+
 func TestNoFindingsForCleanSystem(t *testing.T) {
 	ms := &model.FileInfo{Path: `C:\Windows\System32\svchost.exe`, Exists: true, SHA256: "bb", Signature: "valid", Signer: "Microsoft Windows Publisher"}
 	discord := &model.FileInfo{Path: `C:\Users\ana\AppData\Local\Discord\Update.exe`, Exists: true, Signature: "valid", Signer: "Discord Inc."}

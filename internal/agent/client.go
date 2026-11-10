@@ -145,6 +145,12 @@ func (c *Client) PollCommands() ([]model.Command, error) {
 	return out, err
 }
 
+func (c *Client) SendTelemetry(b *model.TelemetryBatch) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return c.doCtx(ctx, "POST", "/agent/v1/telemetry", jsonBody(b), false, nil)
+}
+
 // Event informa ao servidor o que o agente está fazendo agora (aparece na
 // tela "Ao vivo" do painel). Timeout curto: nunca atrasa a coleta.
 func (c *Client) Event(kind, message string, data map[string]any) error {

@@ -40,6 +40,14 @@ func Processes(in *Inspector, errs *[]string) []model.Process {
 	return out
 }
 
+// DescribeProcess preenche caminho, linha de comando, usuário e horário de
+// início de um processo em execução. users é um cache SID -> nome.
+// Retorna false se o processo não pôde ser aberto (já terminou ou é protegido).
+func DescribeProcess(p *model.Process, users map[string]string) bool {
+	fillProcess(p, users)
+	return p.ImagePath != ""
+}
+
 func fillProcess(p *model.Process, users map[string]string) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, p.PID)
 	if err != nil {

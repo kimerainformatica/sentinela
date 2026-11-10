@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"sentinela/internal/agent/collect"
+	"sentinela/internal/agent/procmon"
 	"sentinela/internal/agent/remediate"
 	"sentinela/internal/model"
 )
@@ -324,6 +325,16 @@ func run(stop <-chan struct{}) error {
 	r.event("agent_started", fmt.Sprintf("Agente %s iniciado %s; varredura a cada %s", Version, priv, interval),
 		map[string]any{"version": Version, "elevated": elevated, "interval": interval.String()})
 
+	mon := procmon.Start()
+	defer mon.Stop()
+	if mon.Source == "etw" {
+		r.event("procmon_started", "Monitor de execuções ativo via ETW (tempo real, inclui processos de milissegundos)", map[string]any{"source": "etw"})
+	} else {
+		r.event("procmon_started", "Monitor de execuções ativo via verificação a cada 1 s (sem ETW: "+mon.Reason+"); processos muito rápidos podem não ser vistos",
+			map[string]any{"source": "poll", "reason": mon.Reason})
+	}
+	go r.telemetryLoop(mon, stop)
+
 	r.scan("inicial")
 	scanT := time.NewTicker(interval)
 	pollT := time.NewTicker(pollInterval)
@@ -339,6 +350,40 @@ func run(stop <-chan struct{}) error {
 			r.scan("agendada")
 		case <-pollT.C:
 			r.poll()
+		}
+	}
+}
+
+// telemetryLoop envia as execuções em lotes a cada 2 s. Se o servidor
+// estiver fora, guarda até 5.000 em memória (as mais antigas são
+// descartadas e contadas).
+func (r *runner) telemetryLoop(mon *procmon.Monitor, stop <-chan struct{}) {
+	const maxBuf, maxBatch = 5000, 500
+	var buf []model.ProcessEvent
+	dropped := 0
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case e := <-mon.Events:
+			buf = append(buf, e)
+			if len(buf) > maxBuf {
+				dropped += len(buf) - maxBuf
+				buf = buf[len(buf)-maxBuf:]
+			}
+		case <-t.C:
+			dropped += mon.Dropped()
+			for len(buf) > 0 || dropped > 0 {
+				n := min(len(buf), maxBatch)
+				b := &model.TelemetryBatch{Processes: buf[:n], Dropped: dropped}
+				if err := r.cl.SendTelemetry(b); err != nil {
+					log.Printf("telemetria: %v (%d execuções aguardando)", err, len(buf))
+					break
+				}
+				buf, dropped = buf[n:], 0
+			}
 		}
 	}
 }
