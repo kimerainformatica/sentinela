@@ -166,6 +166,11 @@ func cmdProcmon(args []string) {
 	} else {
 		fmt.Printf("Monitor ativo via verificação a cada 1 s (ETW indisponível: %s).\n", m.Reason)
 	}
+	if m.NetSource == "etw" {
+		fmt.Println("Rede: ETW Kernel-Network (conexões TCP em tempo real).")
+	} else {
+		fmt.Printf("Rede: verificação a cada 2 s (%s).\n", m.NetReason)
+	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 	var timeout <-chan time.Time
@@ -178,6 +183,21 @@ func cmdProcmon(args []string) {
 			return
 		case <-timeout:
 			return
+		case c := <-m.NetEvents:
+			arrow, sig := "→", "-"
+			if c.Direction == "entrada" {
+				arrow = "←"
+			}
+			if c.File != nil {
+				sig = c.File.Signature
+			}
+			rep := ""
+			if c.Repeats > 0 {
+				rep = fmt.Sprintf(" (+%d repetições)", c.Repeats)
+			}
+			fmt.Printf("%s %-5s REDE %-7s %s (PID %d) %s %s:%d  [local %s:%d] assinatura=%s%s\n",
+				c.Time.Local().Format("15:04:05.000"), c.Source, c.Direction, c.ProcessName, c.PID, arrow,
+				c.RemoteAddr, c.RemotePort, c.LocalAddr, c.LocalPort, sig, rep)
 		case e := <-m.Events:
 			sig := "-"
 			if e.File != nil {

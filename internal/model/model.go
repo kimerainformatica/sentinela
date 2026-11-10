@@ -132,8 +132,29 @@ type ProcessEvent struct {
 	Restricted bool `json:"restricted,omitempty"`
 }
 
+// NetEvent é uma conexão TCP aberta (saída) ou aceita (entrada), capturada
+// no momento em que acontece.
+type NetEvent struct {
+	Time        time.Time `json:"time"`
+	PID         uint32    `json:"pid"`
+	ProcessName string    `json:"process_name,omitempty"`
+	ImagePath   string    `json:"image_path,omitempty"`
+	Direction   string    `json:"direction"` // saida | entrada
+	Proto       string    `json:"proto"`     // TCP | TCP6
+	LocalAddr   string    `json:"local_addr"`
+	LocalPort   uint16    `json:"local_port"`
+	RemoteAddr  string    `json:"remote_addr"`
+	RemotePort  uint16    `json:"remote_port"`
+	File        *FileInfo `json:"file,omitempty"`
+	Source      string    `json:"source"` // etw | poll
+	// Quantas vezes a mesma conexão (processo -> destino) se repetiu desde
+	// o último envio (o agente agrupa repetições por 10 minutos).
+	Repeats int `json:"repeats,omitempty"`
+}
+
 type TelemetryBatch struct {
-	Processes []ProcessEvent `json:"processes"`
+	Processes   []ProcessEvent `json:"processes"`
+	Connections []NetEvent     `json:"connections,omitempty"`
 	// Eventos descartados no agente por excesso de volume.
 	Dropped int `json:"dropped,omitempty"`
 }

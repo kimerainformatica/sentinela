@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -41,6 +43,52 @@ var (
 // {22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716} Microsoft-Windows-Kernel-Process
 var kernelProcessGUID = windows.GUID{Data1: 0x22FB2CD6, Data2: 0x0E7B, Data3: 0x422B,
 	Data4: [8]byte{0xA0, 0xC7, 0x2F, 0xAD, 0x1F, 0xD0, 0xE7, 0x16}}
+
+// {7DD42A49-5329-4832-8DFD-43D979153A88} Microsoft-Windows-Kernel-Network
+var kernelNetworkGUID = windows.GUID{Data1: 0x7DD42A49, Data2: 0x5329, Data3: 0x4832,
+	Data4: [8]byte{0x8D, 0xFD, 0x43, 0xD9, 0x79, 0x15, 0x3A, 0x88}}
+
+// Eventos TCP de Kernel-Network que interessam (os de envio/recebimento de
+// dados são filtrados no próprio kernel, para não pesar na máquina).
+const (
+	netEvtConnectV4 = 12
+	netEvtAcceptV4  = 15
+	netEvtConnectV6 = 28
+	netEvtAcceptV6  = 31
+
+	keywordNetIPv4 = 0x10
+	keywordNetIPv6 = 0x20
+
+	enableTraceParametersVersion2 = 2
+	eventFilterTypeEventID        = 0x80000200
+)
+
+type eventFilterDescriptor struct {
+	Ptr  uint64
+	Size uint32
+	Type uint32
+}
+
+// ENABLE_TRACE_PARAMETERS (o Go insere o alinhamento antes do ponteiro).
+type enableTraceParameters struct {
+	Version          uint32
+	EnableProperty   uint32
+	ControlFlags     uint32
+	SourceID         windows.GUID
+	EnableFilterDesc *eventFilterDescriptor
+	FilterDescCount  uint32
+}
+
+// rawNet é uma conexão extraída do ETW (ou da verificação periódica).
+type rawNet struct {
+	pid                   uint32
+	dir                   string // saida | entrada
+	proto                 string
+	laddr, raddr          string
+	lport, rport          uint16
+	when                  time.Time
+	source                string
+}
 
 // {3D6FA8D0-FE05-11D0-9DDA-00C04FD7BA7C} classe de eventos "Process" do kernel
 var processClassGUID = windows.GUID{Data1: 0x3D6FA8D0, Data2: 0xFE05, Data3: 0x11D0,
@@ -162,7 +210,8 @@ type propertyDataDescriptor struct {
 func init() {
 	// Garante que os layouts batem com os do Windows (x64).
 	if unsafe.Sizeof(eventTraceProperties{}) != 120 || unsafe.Sizeof(eventTraceLogfile{}) != 448 ||
-		unsafe.Sizeof(eventRecord{}) != 112 {
+		unsafe.Sizeof(eventRecord{}) != 112 || unsafe.Sizeof(enableTraceParameters{}) != 48 ||
+		unsafe.Offsetof(enableTraceParameters{}.EnableFilterDesc) != 32 {
 		panic("procmon: layout de estrutura ETW inesperado")
 	}
 }
@@ -183,6 +232,9 @@ type etwSession struct {
 	trace   uint64
 	logfile *eventTraceLogfile
 	out     chan<- rawStart
+	netOut  chan<- rawNet
+	netOK   bool
+	netErr  error
 	devices *deviceMap
 	// parts que cada execução deve reunir antes de ser processada.
 	need uint8
@@ -201,6 +253,16 @@ var etwCallback = syscall.NewCallback(func(rec *eventRecord) uintptr {
 	s := activeETW
 	activeMu.Unlock()
 	if s == nil {
+		return 0
+	}
+	if rec.ProviderID == kernelNetworkGUID {
+		if n, ok := kernelNetConn(rec); ok {
+			n.when = filetimeToTime(rec.TimeStamp)
+			select {
+			case s.netOut <- n:
+			default:
+			}
+		}
 		return 0
 	}
 	var ev rawStart
@@ -343,6 +405,47 @@ func kernelProcessStart(rec *eventRecord) (pid, ppid uint32, name, cmd string, o
 	return pid, ppid, name, cmd, true
 }
 
+// kernelNetConn lê um evento TCP connect/accept do Kernel-Network.
+// daddr/dport = lado remoto; saddr/sport = lado local. Portas vêm em ordem
+// de rede (big-endian).
+func kernelNetConn(rec *eventRecord) (rawNet, bool) {
+	n := rawNet{source: "etw"}
+	switch rec.ID {
+	case netEvtConnectV4:
+		n.dir, n.proto = "saida", "TCP"
+	case netEvtAcceptV4:
+		n.dir, n.proto = "entrada", "TCP"
+	case netEvtConnectV6:
+		n.dir, n.proto = "saida", "TCP6"
+	case netEvtAcceptV6:
+		n.dir, n.proto = "entrada", "TCP6"
+	default:
+		return n, false
+	}
+	pid, ok := tdhUint32(rec, "PID")
+	if !ok {
+		return n, false
+	}
+	n.pid = pid
+	ip := func(name string) string {
+		b, ok := tdhProp(rec, name)
+		if !ok || (len(b) != 4 && len(b) != 16) {
+			return ""
+		}
+		return net.IP(append([]byte(nil), b...)).String()
+	}
+	port := func(name string) uint16 {
+		b, ok := tdhProp(rec, name)
+		if !ok || len(b) < 2 {
+			return 0
+		}
+		return binary.BigEndian.Uint16(b)
+	}
+	n.raddr, n.laddr = ip("daddr"), ip("saddr")
+	n.rport, n.lport = port("dport"), port("sport")
+	return n, n.raddr != ""
+}
+
 // ---------------------------------------------------------------------------
 // Sessão
 
@@ -398,10 +501,33 @@ func (s *etwSession) enableKernelProcess() error {
 	return nil
 }
 
-// startETW inicia a sessão e começa a entregar eventos em out. Retorna
-// erro (ex.: acesso negado sem administrador) para o chamador usar o
-// modo de verificação periódica.
-func startETW(out chan<- rawStart) (*etwSession, error) {
+// enableKernelNetwork liga o Kernel-Network aceitando só os eventos de
+// conexão TCP (filtro por ID aplicado no kernel; Windows 8.1+).
+func (s *etwSession) enableKernelNetwork() error {
+	ids := []uint16{netEvtConnectV4, netEvtAcceptV4, netEvtConnectV6, netEvtAcceptV6}
+	// EVENT_FILTER_EVENT_ID: FilterIn(1) Reserved(1) Count(2) Events[...]
+	filter := make([]byte, 4+2*len(ids))
+	filter[0] = 1
+	binary.LittleEndian.PutUint16(filter[2:], uint16(len(ids)))
+	for i, id := range ids {
+		binary.LittleEndian.PutUint16(filter[4+2*i:], id)
+	}
+	desc := eventFilterDescriptor{Ptr: uint64(uintptr(unsafe.Pointer(&filter[0]))), Size: uint32(len(filter)), Type: eventFilterTypeEventID}
+	params := enableTraceParameters{Version: enableTraceParametersVersion2, EnableFilterDesc: &desc, FilterDescCount: 1}
+	guid := kernelNetworkGUID
+	r, _, _ := procEnableTraceEx2.Call(uintptr(s.handle), uintptr(unsafe.Pointer(&guid)), eventControlCodeEnable,
+		traceLevelVerbose, keywordNetIPv4|keywordNetIPv6, 0, 0, uintptr(unsafe.Pointer(&params)))
+	runtime.KeepAlive(filter)
+	if r != 0 {
+		return fmt.Errorf("EnableTraceEx2 (rede): %w", syscall.Errno(r))
+	}
+	return nil
+}
+
+// startETW inicia a sessão e começa a entregar eventos em out (execuções)
+// e netOut (conexões). Retorna erro (ex.: acesso negado sem
+// administrador) para o chamador usar a verificação periódica.
+func startETW(out chan<- rawStart, netOut chan<- rawNet) (*etwSession, error) {
 	activeMu.Lock()
 	busy := activeETW != nil
 	activeMu.Unlock()
@@ -411,7 +537,7 @@ func startETW(out chan<- rawStart) (*etwSession, error) {
 	if err := procStartTraceW.Find(); err != nil {
 		return nil, err
 	}
-	s := &etwSession{out: out, devices: newDeviceMap()}
+	s := &etwSession{out: out, netOut: netOut, devices: newDeviceMap()}
 
 	// 1ª opção: provedor do kernel (linha de comando) + Kernel-Process (caminho).
 	if err := s.start(true); err == nil {
@@ -434,6 +560,12 @@ func startETW(out chan<- rawStart) (*etwSession, error) {
 			return nil, err
 		}
 		s.need, s.mode = partImage, "Kernel-Process (sem linha de comando de processos rápidos)"
+	}
+
+	// Conexões de rede na mesma sessão (se falhar, o chamador usa a
+	// verificação periódica só para a rede).
+	if s.netErr = s.enableKernelNetwork(); s.netErr == nil {
+		s.netOK = true
 	}
 
 	name, _ := windows.UTF16PtrFromString(sessionName)

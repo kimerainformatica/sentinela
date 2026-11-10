@@ -162,7 +162,7 @@ pre.box { background: var(--bg); border: 1px solid var(--border); border-radius:
 @keyframes flash { from { background: rgba(20,184,166,.22); } }
 .ev-time { color: var(--muted); font-size: 12px; padding-top: 1px; }
 .ev-cat { font-size: 11.5px; font-weight: 600; white-space: nowrap; padding-top: 1px; }
-.cat-agente { color: #93c5fd; } .cat-processo { color: #67e8f9; } .cat-varredura { color: #5eead4; } .cat-achado { color: #fda4af; }
+.cat-agente { color: #93c5fd; } .cat-processo { color: #67e8f9; } .cat-rede { color: #a5b4fc; } .cat-varredura { color: #5eead4; } .cat-achado { color: #fda4af; }
 .cat-inteligencia { color: #c4b5fd; } .cat-comando { color: #fdba74; } .cat-painel { color: var(--muted); }
 .ev-body { min-width: 0; line-height: 1.45; word-break: break-word; }
 .ev-host { font-weight: 600; margin-right: 8px; }

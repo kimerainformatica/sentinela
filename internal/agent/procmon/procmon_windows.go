@@ -33,6 +33,12 @@ type Monitor struct {
 	Reason string
 	Events <-chan model.ProcessEvent
 
+	// Conexões TCP em tempo real.
+	NetSource string // etw | poll
+	NetReason string // por que a rede não usa ETW
+	NetEvents <-chan model.NetEvent
+
+	procs   *procCache
 	need    uint8 // partes que cada execução deve reunir (0 = processa na hora)
 	dropped atomic.Int64
 	stop    chan struct{}
@@ -78,15 +84,29 @@ func snapshot() map[uint32]procEntry {
 func Start() *Monitor {
 	raw := make(chan rawStart, 8192)
 	out := make(chan model.ProcessEvent, 4096)
-	m := &Monitor{Events: out, stop: make(chan struct{})}
+	netRaw := make(chan rawNet, 8192)
+	netOut := make(chan model.NetEvent, 4096)
+	m := &Monitor{Events: out, NetEvents: netOut, stop: make(chan struct{}), procs: newProcCache()}
+	for pid, e := range snapshot() {
+		m.procs.set(pid, e)
+	}
 
-	if s, err := startETW(raw); err == nil {
+	if s, err := startETW(raw, netRaw); err == nil {
 		m.Source, m.Mode, m.etw, m.need = "etw", s.mode, s, s.need
+		if s.netOK {
+			m.NetSource = "etw"
+		} else {
+			m.NetSource, m.NetReason = "poll", s.netErr.Error()
+			go netPollLoop(netRaw, m.stop)
+		}
 	} else {
 		m.Source, m.Mode, m.Reason = "poll", "verificação a cada 1 s", err.Error()
+		m.NetSource, m.NetReason = "poll", err.Error()
 		go pollLoop(raw, m.stop)
+		go netPollLoop(netRaw, m.stop)
 	}
 	go m.enrich(raw, out)
+	go m.enrichNet(netRaw, netOut)
 	return m
 }
 
@@ -232,6 +252,7 @@ func (m *Monitor) enrich(raw <-chan rawStart, out chan<- model.ProcessEvent) {
 			ev.File = in.Inspect(ev.ImagePath)
 		}
 		known[r.pid] = procEntry{ppid: r.ppid, name: ev.Name, image: ev.ImagePath}
+		m.procs.set(r.pid, known[r.pid])
 
 		select {
 		case out <- ev:
@@ -251,6 +272,7 @@ func (m *Monitor) enrich(raw <-chan rawStart, out chan<- model.ProcessEvent) {
 					delete(known, pid)
 				}
 			}
+			m.procs.prune(cur)
 		case <-flush.C:
 			for pid, w := range waiting {
 				if time.Since(w.since) >= mergeTimeout {

@@ -112,3 +112,36 @@ func TestNoFindingsForCleanSystem(t *testing.T) {
 		t.Fatalf("esperava nenhum achado, obtido %+v", fs)
 	}
 }
+
+func TestEvaluateNetConnection(t *testing.T) {
+	ps := &model.FileInfo{Path: `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, Exists: true, Signature: "valid", Signer: "Microsoft Windows"}
+	evil := &model.FileInfo{Path: `C:\Users\ana\AppData\Roaming\upd\svc.exe`, Exists: true, Signature: "unsigned", SHA256: "dd"}
+	chrome := &model.FileInfo{Path: `C:\Program Files\Google\Chrome\Application\chrome.exe`, Exists: true, Signature: "valid", Signer: "Google LLC"}
+	intel := Intel{IPs: map[string]IPRep{"185.220.101.4": {Status: "known", Score: 100, Country: "DE"}}}
+
+	cases := []struct {
+		name string
+		ev   model.NetEvent
+		want map[string]string
+	}{
+		{"powershell baixando", model.NetEvent{ProcessName: "powershell.exe", ImagePath: ps.Path, File: ps, Direction: "saida", RemoteAddr: "93.184.216.34", RemotePort: 443}, map[string]string{"R19": SevMedia}},
+		{"trojan para C2", model.NetEvent{ProcessName: "svc.exe", ImagePath: evil.Path, File: evil, Direction: "saida", RemoteAddr: "185.220.101.4", RemotePort: 4444},
+			map[string]string{"R10": SevAlta, "R11": SevCritica, "R18": SevMedia}},
+		{"backdoor aceitando", model.NetEvent{ProcessName: "svc.exe", ImagePath: evil.Path, File: evil, Direction: "entrada", RemoteAddr: "10.0.0.9", RemotePort: 51000, LocalPort: 8080}, map[string]string{"R16": SevMedia}},
+		{"navegador normal", model.NetEvent{ProcessName: "chrome.exe", ImagePath: chrome.Path, File: chrome, Direction: "saida", RemoteAddr: "142.250.1.1", RemotePort: 443}, map[string]string{}},
+		{"powershell na rede local", model.NetEvent{ProcessName: "powershell.exe", ImagePath: ps.Path, File: ps, Direction: "saida", RemoteAddr: "192.168.0.10", RemotePort: 5985}, map[string]string{}},
+	}
+	for _, c := range cases {
+		c.ev.Time = time.Now()
+		got := rules(EvaluateNetConnection(&c.ev, intel))
+		if len(got) != len(c.want) {
+			t.Errorf("%s: obtido %v, esperado %v", c.name, got, c.want)
+			continue
+		}
+		for k, v := range c.want {
+			if got[k] != v {
+				t.Errorf("%s: %s=%q, esperado %q", c.name, k, got[k], v)
+			}
+		}
+	}
+}

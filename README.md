@@ -61,21 +61,25 @@ todas as máquinas, com registro de cada ação.
 | R15 | alta | Processo com linha de comando suspeita | T1059 |
 | R16 | média | Programa sem assinatura em pasta do usuário aguardando conexões (possível backdoor) | T1571 |
 | R17 | média | *(tempo real)* Programa sem assinatura **executado** de pasta do usuário (Downloads, Temp, AppData…) | T1204.002 |
+| R18 | média | *(tempo real)* Conexão para porta típica de ataque/C2 (4444, IRC, Tor…) | T1571 |
+| R19 | alta / média | *(tempo real)* Script ou utilitário do Windows conectando à internet (mshta, rundll32, wscript, certutil… / PowerShell) | T1105 |
 
-As regras de processo (R01, R04, R05, R14, R15, R17) também rodam **no instante da execução** (veja abaixo),
+As regras de processo (R01, R04, R05, R14, R15, R17) e de rede (R10, R11, R16, R18, R19) também rodam **no instante do evento** (veja abaixo),
 então pegam até um PowerShell que dura meio segundo. Esses achados ficam abertos até o analista marcá-los como
 resolvidos, já que o processo pode não existir mais na varredura seguinte.
 
-## Execuções em tempo real
+## Execuções e conexões em tempo real
 
-Além das varreduras periódicas, o agente captura **cada programa no momento em que é aberto**, com linha de
-comando, usuário, processo pai, assinatura e hash. Tudo aparece na tela **Ao vivo** e na aba
-**Execuções em tempo real** de cada máquina.
+Além das varreduras periódicas, o agente captura **cada programa no momento em que é aberto** (linha de
+comando, usuário, processo pai, assinatura e hash) e **cada conexão TCP no momento em que é aberta ou aceita**
+(processo dono, destino, porta). Tudo aparece na tela **Ao vivo** e nas abas **Execuções em tempo real** e
+**Rede em tempo real** de cada máquina. Conexões repetidas do mesmo programa para o mesmo destino são agrupadas
+(um evento a cada 10 minutos, com o número de repetições).
 
 | Agente rodando como | Fonte | Cobertura |
 |---|---|---|
-| Serviço (SYSTEM) / administrador | **ETW** (`Microsoft-Windows-Kernel-Process`) | Todos os processos, inclusive os de milissegundos |
-| Usuário comum (modo `dev`) | Verificação a cada 1 s | Processos que ficam abertos por ~1 s ou mais |
+| Serviço (SYSTEM) / administrador | **ETW**: provedor de processos do kernel + `Microsoft-Windows-Kernel-Process` + `Microsoft-Windows-Kernel-Network` (só eventos de conexão, filtrados no kernel) | Todos os processos com linha de comando, inclusive os de milissegundos; todas as conexões TCP |
+| Usuário comum (modo `dev`) | Verificação a cada 1 s (processos) e 2 s (conexões) | O que fica aberto por mais que esse intervalo |
 
 Diagnóstico local: `sentinela-agent.exe procmon -for 30s` mostra as execuções no terminal e informa qual fonte está ativa.
 
@@ -143,7 +147,7 @@ O agente roda como SYSTEM, então o canal de comandos é o alvo mais valioso. Po
 
 ## Limitações conhecidas (próximos passos)
 
-1. **Tempo real só para execução de processos.** Persistência, arquivos e conexões de rede ainda são vistos apenas nas varreduras periódicas. Próximo passo: ETW de rede (`Microsoft-Windows-Kernel-Network`) e de registro. Sem administrador, processos que duram menos de ~1 s podem escapar.
+1. **Tempo real para processos e conexões TCP.** Persistência (registro, tarefas) e arquivos ainda são vistos apenas nas varreduras periódicas; UDP/DNS não são monitorados. Próximo passo: ETW de registro e de DNS. Sem administrador, processos e conexões muito curtos podem escapar.
 2. **Persistência ainda não coberta**: assinaturas WMI, extensões do Explorer, COM hijacking, hives de usuários deslogados.
 3. **Um único usuário (admin)**. Próximo passo: múltiplos usuários com papéis (leitura / analista / admin).
 4. **SQLite** atende algumas dezenas de máquinas com snapshots. Com telemetria em tempo real (item 1), migrar os eventos para ClickHouse.

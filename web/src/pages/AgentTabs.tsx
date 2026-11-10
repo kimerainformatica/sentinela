@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { FileDetails, SigCell, VtCell } from "../components";
-import type { Autorun, Command, Execution, FileInfo, Finding, Process, Scan, Snapshot } from "../types";
+import type { Autorun, Command, Execution, FileInfo, Finding, NetConn, Process, Scan, Snapshot } from "../types";
 import { ACTION_LABEL, TRIGGER_LABEL, fmtTime, isMicrosoft, usePoll, vtLink } from "../util";
 import { api } from "../api";
 import { useLiveRefresh } from "../live";
@@ -540,6 +540,96 @@ export function ExecutionsTab({ agentId, findings, send }: { agentId: string; fi
                 </tr>
               );
             })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Rede em tempo real
+
+export function NetLiveTab({ agentId, findings }: { agentId: string; findings: Finding[] }) {
+  const [q, setQ] = useState("");
+  const [onlyPublic, setOnlyPublic] = useState(true);
+  const [hideMs, setHideMs] = useState(true);
+  const { data, reload } = usePoll(() => api.get<NetConn[]>(`/api/agents/${agentId}/net-events?limit=500&q=${encodeURIComponent(q)}`), 15000, [agentId, q]);
+  useLiveRefresh(reload, (e) => e.agent_id === agentId && e.category === "rede", 1200);
+  const flagged = useMemo(
+    () => new Set(findings.filter((f) => f.status === "aberto" && f.object_type === "connection" && f.path).map((f) => f.path.toLowerCase())),
+    [findings],
+  );
+  const all = data ?? [];
+  const rows = all
+    .filter((c) => !onlyPublic || c.public)
+    .filter((c) => !hideMs || flagged.has(c.image.toLowerCase()) || !(c.signature === "valid" && c.signer.startsWith("Microsoft")));
+  const etw = all.some((c) => c.source === "etw");
+  const fmtAddr = (a: string, p: number) => (a.includes(":") ? `[${a}]:${p}` : `${a}:${p}`);
+
+  return (
+    <>
+      <div className="row" style={{ marginBottom: 12 }}>
+        <input type="text" placeholder="Buscar programa, IP ou porta…" value={q} onChange={(e) => setQ(e.target.value)} style={{ minWidth: 260 }} />
+        <label className="check">
+          <input type="checkbox" checked={onlyPublic} onChange={(e) => setOnlyPublic(e.target.checked)} />
+          Só internet (ocultar rede local)
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={hideMs} onChange={(e) => setHideMs(e.target.checked)} />
+          Ocultar programas da Microsoft
+        </label>
+        <span className="small muted">
+          {rows.length} de {all.length} ·{" "}
+          {all.length === 0 ? "aguardando" : etw ? "captura via ETW (cada conexão)" : "captura a cada 2 s (conexões muito curtas podem escapar)"}
+        </span>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Quando</th>
+              <th>Programa</th>
+              <th>Direção</th>
+              <th>Destino / origem</th>
+              <th>Assinatura</th>
+              <th>Reputação do IP</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((c) => (
+              <tr key={c.id} className={flagged.has(c.image.toLowerCase()) || c.ip.score >= 25 ? "hl" : ""}>
+                <td className="small mono" style={{ whiteSpace: "nowrap" }}>
+                  {fmtClock(c.ts)}
+                  <div className="muted">{new Date(c.ts).toLocaleDateString("pt-BR")}</div>
+                </td>
+                <td style={{ maxWidth: 360 }}>
+                  <strong>{c.process || "—"}</strong> <span className="small muted mono">PID {c.pid}</span>
+                  {c.image && <div className="small muted mono break">{c.image}</div>}
+                </td>
+                <td className="small">{c.direction === "entrada" ? "← entrada" : "→ saída"}</td>
+                <td className="mono small">
+                  {fmtAddr(c.remote_addr, c.remote_port)}
+                  {!c.public && <span className="muted"> (local)</span>}
+                  {c.repeats > 0 && <div className="muted">+{c.repeats} repetições</div>}
+                  {c.direction === "entrada" && <div className="muted">porta local {c.local_port}</div>}
+                </td>
+                <td>
+                  {c.signature ? <span className={`badge sig-${c.signature}`}>{SIG_TXT[c.signature]}</span> : <span className="muted">—</span>}
+                  {c.signer && <div className="small">{c.signer}</div>}
+                </td>
+                <td className="small">
+                  {c.ip.status === "known" ? (
+                    <>
+                      <span className={`badge ${c.ip.score >= 75 ? "sev-critica" : c.ip.score >= 25 ? "sev-media" : "st-ok"}`}>{c.ip.score}% abuso</span> {c.ip.country}
+                      <div className="muted">{c.ip.isp}</div>
+                    </>
+                  ) : (
+                    <span className="muted">{c.ip.status === "pending" ? "na fila" : c.public ? "—" : "rede local"}</span>
+                  )}
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>

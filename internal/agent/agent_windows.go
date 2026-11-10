@@ -333,6 +333,11 @@ func run(stop <-chan struct{}) error {
 		r.event("procmon_started", "Monitor de execuções ativo via verificação a cada 1 s (sem ETW: "+mon.Reason+"); processos muito rápidos podem não ser vistos",
 			map[string]any{"source": "poll", "reason": mon.Reason})
 	}
+	if mon.NetSource == "etw" {
+		r.event("procmon_started", "Monitor de conexões ativo via ETW (cada conexão TCP no momento em que é aberta)", map[string]any{"source": "etw", "kind": "rede"})
+	} else {
+		r.event("procmon_started", "Monitor de conexões ativo via verificação a cada 2 s ("+mon.NetReason+")", map[string]any{"source": "poll", "kind": "rede"})
+	}
 	go r.telemetryLoop(mon, stop)
 
 	r.scan("inicial")
@@ -360,6 +365,7 @@ func run(stop <-chan struct{}) error {
 func (r *runner) telemetryLoop(mon *procmon.Monitor, stop <-chan struct{}) {
 	const maxBuf, maxBatch = 5000, 500
 	var buf []model.ProcessEvent
+	var nbuf []model.NetEvent
 	dropped := 0
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
@@ -373,16 +379,22 @@ func (r *runner) telemetryLoop(mon *procmon.Monitor, stop <-chan struct{}) {
 				dropped += len(buf) - maxBuf
 				buf = buf[len(buf)-maxBuf:]
 			}
+		case c := <-mon.NetEvents:
+			nbuf = append(nbuf, c)
+			if len(nbuf) > maxBuf {
+				dropped += len(nbuf) - maxBuf
+				nbuf = nbuf[len(nbuf)-maxBuf:]
+			}
 		case <-t.C:
 			dropped += mon.Dropped()
-			for len(buf) > 0 || dropped > 0 {
-				n := min(len(buf), maxBatch)
-				b := &model.TelemetryBatch{Processes: buf[:n], Dropped: dropped}
+			for len(buf) > 0 || len(nbuf) > 0 || dropped > 0 {
+				n, k := min(len(buf), maxBatch), min(len(nbuf), maxBatch)
+				b := &model.TelemetryBatch{Processes: buf[:n], Connections: nbuf[:k], Dropped: dropped}
 				if err := r.cl.SendTelemetry(b); err != nil {
-					log.Printf("telemetria: %v (%d execuções aguardando)", err, len(buf))
+					log.Printf("telemetria: %v (%d execuções e %d conexões aguardando)", err, len(buf), len(nbuf))
 					break
 				}
-				buf, dropped = buf[n:], 0
+				buf, nbuf, dropped = buf[n:], nbuf[k:], 0
 			}
 		}
 	}

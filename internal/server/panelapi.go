@@ -35,6 +35,7 @@ func (s *Server) panelRoutes(mux *http.ServeMux) {
 	h("DELETE /api/agents/{id}", s.handleDeleteAgent)
 	h("GET /api/agents/{id}/snapshot", s.handleSnapshot)
 	h("GET /api/agents/{id}/executions", s.handleExecutions)
+	h("GET /api/agents/{id}/net-events", s.handleNetEvents)
 	h("GET /api/agents/{id}/commands", s.handleListCommands)
 	h("POST /api/agents/{id}/commands", s.handleCreateCommand)
 	h("POST /api/agents/{id}/clear-compromise", s.handleClearCompromise)

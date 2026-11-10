@@ -6,9 +6,9 @@ import { TRIGGER_LABEL, ago, fmtTime, isMicrosoft, usePoll } from "../util";
 import { FindingCard } from "./Findings";
 import { useLiveEvents, useLiveRefresh, useLiveStatus } from "../live";
 import { LiveFeed, StatusPill } from "../LiveFeed";
-import { ActionsTab, AutorunsTab, DisableAutorunButton, ExecutionsTab, KillButton, NetworkTab, ProcessesTab, QuarantineButton, type SendFn } from "./AgentTabs";
+import { ActionsTab, AutorunsTab, DisableAutorunButton, ExecutionsTab, KillButton, NetLiveTab, NetworkTab, ProcessesTab, QuarantineButton, type SendFn } from "./AgentTabs";
 
-type Tab = "achados" | "execucoes" | "inicializacao" | "processos" | "rede" | "acoes";
+type Tab = "achados" | "execucoes" | "rede-tr" | "inicializacao" | "processos" | "rede" | "acoes";
 
 type StepState = "done" | "warn" | "bad" | "todo";
 interface Step {
@@ -155,9 +155,10 @@ export default function AgentDetail({ id }: { id: string }) {
   const tabs: [Tab, string, number | null][] = [
     ["achados", "Achados", open.length],
     ["execucoes", "Execuções em tempo real", null],
+    ["rede-tr", "Rede em tempo real", null],
     ["inicializacao", "Inicialização automática", autoruns.length],
     ["processos", "Processos", procs.length],
-    ["rede", "Conexões de rede", (s?.report.connections ?? []).filter((c) => c.state === "ESTABLISHED").length],
+    ["rede", "Conexões (última varredura)", (s?.report.connections ?? []).filter((c) => c.state === "ESTABLISHED").length],
     ["acoes", "Ações e verificação", (commands.data ?? []).length],
   ];
 
@@ -296,6 +297,7 @@ export default function AgentDetail({ id }: { id: string }) {
         </>
       )}
       {tab === "execucoes" && <ExecutionsTab agentId={id} findings={allF} send={send} />}
+      {tab === "rede-tr" && <NetLiveTab agentId={id} findings={allF} />}
       {s && tab === "inicializacao" && <AutorunsTab snap={s} findings={allF} send={send} />}
       {s && tab === "processos" && <ProcessesTab snap={s} findings={allF} send={send} />}
       {s && tab === "rede" && <NetworkTab snap={s} findings={allF} send={send} />}

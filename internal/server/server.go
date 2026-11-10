@@ -340,6 +340,7 @@ func (s *Server) reevaluateLoop(ctx context.Context) {
 			continue
 		}
 		s.reevaluateExecutions()
+		s.reevaluateConnections()
 		ids, err := s.db.SnapshotAgents()
 		if err != nil {
 			continue
@@ -376,5 +377,6 @@ func (s *Server) housekeeping(ctx context.Context) {
 		s.db.Exec(`DELETE FROM scans WHERE received_at < ?`, n-90*86400)
 		s.db.Exec(`DELETE FROM events WHERE id <= (SELECT max(id) FROM events) - ?`, maxStoredEvents)
 		s.db.Exec(`DELETE FROM proc_events WHERE id <= (SELECT max(id) FROM proc_events) - ?`, maxStoredProcEvts)
+		s.db.Exec(`DELETE FROM net_events WHERE id <= (SELECT max(id) FROM net_events) - ?`, maxStoredProcEvts)
 	}
 }

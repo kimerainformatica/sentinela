@@ -194,3 +194,25 @@ export interface Execution {
   restricted: boolean;
   vt: HashRep | { status: ""; malicious: number; total: number; label: string; suspicious: number };
 }
+
+/** Conexão TCP capturada em tempo real. */
+export interface NetConn {
+  id: number;
+  ts: number; // ms
+  pid: number;
+  process: string;
+  image: string;
+  direction: "saida" | "entrada";
+  proto: string;
+  local_addr: string;
+  local_port: number;
+  remote_addr: string;
+  remote_port: number;
+  sha256: string;
+  signature: "" | "valid" | "unsigned" | "invalid" | "error";
+  signer: string;
+  source: "etw" | "poll";
+  repeats: number;
+  public: boolean;
+  ip: IPRep;
+}

@@ -495,6 +495,85 @@ func EvaluateExecution(ev *model.ProcessEvent, intel Intel) []Finding {
 	return e.out
 }
 
+// Portas remotas típicas de ferramentas de ataque, botnets e Tor.
+var suspiciousPorts = map[uint16]string{
+	4444: "porta padrão do Metasploit", 1337: "porta comum de backdoors", 31337: "porta clássica de backdoors",
+	6666: "IRC (botnets)", 6667: "IRC (botnets)", 6697: "IRC com TLS (botnets)",
+	9001: "rede Tor", 9030: "rede Tor", 9050: "proxy Tor", 9150: "proxy Tor (Tor Browser)",
+}
+
+// Programas que normalmente não deveriam baixar nada da internet; quando
+// conectam, costuma ser um script baixando o próximo estágio do ataque.
+var scriptNetHosts = map[string]string{
+	"powershell.exe": SevMedia, "pwsh.exe": SevMedia,
+	"wscript.exe": SevAlta, "cscript.exe": SevAlta, "mshta.exe": SevAlta, "rundll32.exe": SevAlta,
+	"regsvr32.exe": SevAlta, "certutil.exe": SevAlta, "bitsadmin.exe": SevAlta, "msiexec.exe": SevMedia,
+	"cmd.exe": SevAlta,
+}
+
+// EvaluateNetConnection aplica as regras de rede a uma conexão capturada
+// em tempo real.
+func EvaluateNetConnection(c *model.NetEvent, intel Intel) []Finding {
+	e := &evaluator{rep: &model.Report{CollectedAt: c.Time}, intel: intel, seen: map[string]bool{}}
+	who := c.ProcessName
+	if who == "" {
+		who = fmt.Sprintf("PID %d", c.PID)
+	}
+	ref := c.ImagePath
+	if ref == "" {
+		ref = strings.ToLower(who)
+	}
+	remote := fmt.Sprintf("%s:%d", c.RemoteAddr, c.RemotePort)
+	if strings.Contains(c.RemoteAddr, ":") {
+		remote = fmt.Sprintf("[%s]:%d", c.RemoteAddr, c.RemotePort)
+	}
+	ctx := fmt.Sprintf("%s (PID %d, %s)", who, c.PID, c.ImagePath)
+	public := publicIP(c.RemoteAddr)
+	out := c.Direction == "saida"
+
+	if r, ok := intel.IPs[c.RemoteAddr]; ok && r.Status == "known" && r.Score >= 25 {
+		sev := SevMedia
+		if r.Score >= 75 {
+			sev = SevCritica
+		}
+		e.add(Finding{RuleID: "R11", Severity: sev, Technique: "T1071",
+			Title:  fmt.Sprintf("Conexão com IP de má reputação (%d%% de confiança de abuso)", r.Score),
+			Detail: fmt.Sprintf("%s %s %s (%s, %s, %d denúncias no AbuseIPDB)", ctx, map[bool]string{true: "conectou a", false: "recebeu conexão de"}[out], remote, r.Country, r.ISP, r.Reports),
+			ObjectType: "connection", ObjectRef: ref + "|" + c.RemoteAddr, Path: c.ImagePath, SHA256: shaOf(c.File)})
+	}
+	if out && public && unsignedFile(c.File) && userWritable(c.ImagePath) {
+		e.add(Finding{RuleID: "R10", Severity: SevAlta, Technique: "T1071",
+			Title:  "Programa sem assinatura em pasta do usuário com conexão externa",
+			Detail: ctx + " conectou a " + remote + ". " + describe(c.File),
+			ObjectType: "connection", ObjectRef: ref, Path: c.ImagePath, SHA256: shaOf(c.File)})
+	}
+	if !out && unsignedFile(c.File) && userWritable(c.ImagePath) {
+		e.add(Finding{RuleID: "R16", Severity: SevMedia, Technique: "T1571",
+			Title:  fmt.Sprintf("Programa sem assinatura aceitou conexão na porta %d", c.LocalPort),
+			Detail: ctx + " recebeu conexão de " + remote + ". Pode ser um acesso remoto (backdoor). " + describe(c.File),
+			ObjectType: "connection", ObjectRef: ref + "|listen", Path: c.ImagePath, SHA256: shaOf(c.File)})
+	}
+	if why, ok := suspiciousPorts[c.RemotePort]; ok && out && public {
+		e.add(Finding{RuleID: "R18", Severity: SevMedia, Technique: "T1571",
+			Title:  fmt.Sprintf("Conexão para a porta %d (%s)", c.RemotePort, why),
+			Detail: ctx + " conectou a " + remote + ". Essa porta é usada com frequência por ferramentas de ataque e comando remoto (C2).",
+			ObjectType: "connection", ObjectRef: ref + "|" + fmt.Sprint(c.RemotePort), Path: c.ImagePath, SHA256: shaOf(c.File)})
+	}
+	if sev, ok := scriptNetHosts[strings.ToLower(c.ProcessName)]; ok && out && public {
+		e.add(Finding{RuleID: "R19", Severity: sev, Technique: "T1105",
+			Title:  c.ProcessName + " conectou à internet",
+			Detail: ctx + " conectou a " + remote + ". Interpretadores de script e utilitários do Windows conectando à internet é típico de malware baixando o próximo estágio. Confira a linha de comando na aba Execuções.",
+			ObjectType: "connection", ObjectRef: ref, Path: c.ImagePath, SHA256: shaOf(c.File)})
+	}
+
+	when := c.Time.Local().Format("02/01 15:04:05")
+	for i := range e.out {
+		e.out[i].Key = RealtimePrefix + e.out[i].Key
+		e.out[i].Detail = "Conexão capturada em tempo real em " + when + ". " + e.out[i].Detail
+	}
+	return e.out
+}
+
 // HostStatus resume a situação do endpoint pela maior severidade aberta.
 func HostStatus(maxSev string) string {
 	switch maxSev {

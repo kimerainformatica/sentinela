@@ -124,6 +124,20 @@ CREATE TABLE IF NOT EXISTS proc_events(
 );
 CREATE INDEX IF NOT EXISTS proc_events_agent ON proc_events(agent_id, id);
 CREATE INDEX IF NOT EXISTS proc_events_sha ON proc_events(sha256);
+
+-- Conexões TCP capturadas em tempo real.
+CREATE TABLE IF NOT EXISTS net_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  ts INTEGER NOT NULL, -- unix ms
+  pid INTEGER NOT NULL, process TEXT NOT NULL, image TEXT NOT NULL,
+  direction TEXT NOT NULL, proto TEXT NOT NULL,
+  laddr TEXT NOT NULL, lport INTEGER NOT NULL, raddr TEXT NOT NULL, rport INTEGER NOT NULL,
+  sha256 TEXT NOT NULL, signature TEXT NOT NULL, signer TEXT NOT NULL,
+  source TEXT NOT NULL, repeats INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS net_events_agent ON net_events(agent_id, id);
+CREATE INDEX IF NOT EXISTS net_events_raddr ON net_events(raddr);
 `
 
 // Migrações para bancos criados por versões anteriores. Erros de "coluna

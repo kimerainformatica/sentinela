@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 
-export type Category = "agente" | "processo" | "varredura" | "achado" | "inteligencia" | "comando" | "painel";
+export type Category = "agente" | "processo" | "rede" | "varredura" | "achado" | "inteligencia" | "comando" | "painel";
 export type Level = "info" | "ok" | "alerta" | "critico";
 
 export interface LiveEvent {
