@@ -75,19 +75,38 @@ type cmsgSignerInfo struct {
 
 const cmsgSignerInfoParam = 6
 
-// Inspector coleta e mantém em cache as informações de arquivos durante uma
-// varredura (o mesmo executável costuma aparecer várias vezes).
+// Inspector analisa arquivos e mantém o resultado em cache (veja
+// cache_windows.go). É seguro para uso simultâneo: o agente usa o mesmo
+// Inspector nas varreduras e no monitor em tempo real.
 type Inspector struct {
 	mu       sync.Mutex
-	cache    map[string]*model.FileInfo
+	cache    map[string]*cacheEntry
 	catAdmin map[string]uintptr
+	perf     *inspectPerf
+	// catMu serializa o uso dos contextos de catálogo (CryptCATAdmin), que
+	// não são documentados como seguros para uso simultâneo.
+	catMu sync.Mutex
+	// Resultado da verificação de cada catálogo (.cat). Um catálogo cobre
+	// milhares de arquivos do sistema: a assinatura dele é verificada uma
+	// vez (refeita se o .cat mudar); para cada arquivo basta o Windows ter
+	// encontrado o hash dele no catálogo (CryptCATAdminEnumCatalogFromHash).
+	catTrust map[string]catTrust
+}
+
+type catTrust struct {
+	status uint32
+	signer string
+	stamp  fileStamp
 }
 
 func NewInspector() *Inspector {
-	return &Inspector{cache: map[string]*model.FileInfo{}, catAdmin: map[string]uintptr{}}
+	return &Inspector{cache: map[string]*cacheEntry{}, catAdmin: map[string]uintptr{}, perf: newInspectPerf(),
+		catTrust: map[string]catTrust{}}
 }
 
 func (in *Inspector) Close() {
+	in.catMu.Lock()
+	defer in.catMu.Unlock()
 	for _, h := range in.catAdmin {
 		if h != 0 {
 			procCATAdminReleaseContext.Call(h, 0)
@@ -101,54 +120,58 @@ func (in *Inspector) Inspect(path string) *model.FileInfo {
 	if path == "" {
 		return nil
 	}
+	in.perf.lookups.Add(1)
 	key := strings.ToLower(path)
+
+	t := time.Now()
+	st, stErr := stampFile(path)
+	in.perf.time(OpStat, t, 0)
+
 	in.mu.Lock()
-	fi, ok := in.cache[key]
+	e, ok := in.cache[key]
 	in.mu.Unlock()
-	if ok {
-		// O monitor em tempo real usa o mesmo Inspector por muito tempo:
-		// se o arquivo foi trocado (tamanho/data), analisa de novo.
-		st, err := os.Stat(path)
-		same := (err != nil && !fi.Exists) ||
-			(err == nil && fi.Exists && st.Size() == fi.Size && st.ModTime().UTC().Equal(fi.Modified))
-		if same {
-			return fi
-		}
+	now := time.Now()
+	if ok && e.fresh(key, st, stErr, now) {
+		in.perf.hits.Add(1)
+		return e.FI
 	}
 
-	fi = in.inspect(path)
+	t0 := time.Now()
+	fi := in.inspect(path, st, stErr)
+	in.perf.file(path, time.Since(t0))
 
 	in.mu.Lock()
-	if len(in.cache) > 20000 { // limite de memória em execução longa
-		in.cache = map[string]*model.FileInfo{}
+	if len(in.cache) >= cacheMax { // limite de memória em execução longa
+		in.cache = map[string]*cacheEntry{}
 	}
-	in.cache[key] = fi
+	in.cache[key] = &cacheEntry{FI: fi, Size: st.Size, Write: st.Write, Change: st.Change, Checked: now}
 	in.mu.Unlock()
 	return fi
 }
 
-func (in *Inspector) inspect(path string) *model.FileInfo {
+func (in *Inspector) inspect(path string, st fileStamp, err error) *model.FileInfo {
 	fi := &model.FileInfo{Path: path}
-	st, err := os.Stat(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			fi.Error = err.Error()
 		}
 		return fi
 	}
-	if st.IsDir() {
+	if st.Dir {
 		fi.Error = "é um diretório"
 		return fi
 	}
 	fi.Exists = true
-	fi.Size = st.Size()
-	fi.Modified = st.ModTime().UTC()
-	if attr, ok := st.Sys().(*syscall.Win32FileAttributeData); ok {
-		fi.Created = time.Unix(0, attr.CreationTime.Nanoseconds()).UTC()
-	}
+	fi.Size = st.Size
+	fi.Modified = filetime(st.Write)
+	fi.Created = filetime(st.Created)
+	fi.Attributes = attrNames(st.Attrs)
 
 	if fi.Size <= maxHashSize {
-		if h, err := hashFile(path); err == nil {
+		t := time.Now()
+		h, err := hashFile(path)
+		in.perf.time(OpHash, t, fi.Size)
+		if err == nil {
 			fi.SHA256 = h
 		} else {
 			fi.Error = "hash: " + err.Error()
@@ -157,10 +180,31 @@ func (in *Inspector) inspect(path string) *model.FileInfo {
 		fi.Error = fmt.Sprintf("arquivo grande demais para hash (%d MB)", fi.Size>>20)
 	}
 
+	t := time.Now()
 	readVersionInfo(path, fi)
+	in.perf.time(OpVersion, t, 0)
 	in.verifySignature(path, fi)
+	in.deepAnalysis(path, fi)
 	return fi
 }
+
+// attrNames traduz os atributos do arquivo que importam para a análise.
+func attrNames(a uint32) []string {
+	var out []string
+	if a&windows.FILE_ATTRIBUTE_HIDDEN != 0 {
+		out = append(out, "oculto")
+	}
+	if a&windows.FILE_ATTRIBUTE_SYSTEM != 0 {
+		out = append(out, "sistema")
+	}
+	if a&windows.FILE_ATTRIBUTE_READONLY != 0 {
+		out = append(out, "somente-leitura")
+	}
+	return out
+}
+
+// Buffers de leitura de 1 MB (menos chamadas ao sistema que os 32 KB padrão).
+var hashBufs = sync.Pool{New: func() any { b := make([]byte, 1<<20); return &b }}
 
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path)
@@ -169,7 +213,10 @@ func hashFile(path string) (string, error) {
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	buf := hashBufs.Get().(*[]byte)
+	defer hashBufs.Put(buf)
+	// struct{io.Reader}: sem isso o *os.File (WriterTo) ignora o buffer.
+	if _, err := io.CopyBuffer(h, struct{ io.Reader }{f}, *buf); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -216,17 +263,22 @@ func (in *Inspector) verifySignature(path string, fi *model.FileInfo) {
 		Size:     uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
 		FilePath: p16,
 	}
+	t := time.Now()
 	status := winVerify(windows.WTD_CHOICE_FILE, unsafe.Pointer(&file))
+	in.perf.time(OpSignature, t, 0)
 
 	switch status {
 	case 0:
 		fi.Signature = "valid"
-		fi.Signer = signerFromFile(path)
+		fi.Signer = in.signer(path)
 		return
 	case trustENoSignature, trustESubjectFormUnknwn, trustEProviderUnknown:
 		// Sem assinatura embutida: tenta o catálogo do Windows (é assim que
 		// a maioria dos binários do sistema é assinada).
-		if catFile, st, found := in.verifyCatalog(path); found {
+		t = time.Now()
+		_, st, signer, found := in.verifyCatalog(path)
+		in.perf.time(OpCatalog, t, 0)
+		if found {
 			fi.CatalogSigned = true
 			if st == 0 {
 				fi.Signature = "valid"
@@ -234,7 +286,7 @@ func (in *Inspector) verifySignature(path string, fi *model.FileInfo) {
 				fi.Signature = "invalid"
 				fi.Error = joinErr(fi.Error, trustReason(st))
 			}
-			fi.Signer = signerFromFile(catFile)
+			fi.Signer = signer
 			return
 		}
 		fi.Signature = "unsigned"
@@ -245,7 +297,7 @@ func (in *Inspector) verifySignature(path string, fi *model.FileInfo) {
 		// Assinatura presente mas inválida (adulterada, revogada, raiz não
 		// confiável...). Ainda mostramos quem "diz" ter assinado.
 		fi.Signature = "invalid"
-		fi.Signer = signerFromFile(path)
+		fi.Signer = in.signer(path)
 		fi.Error = joinErr(fi.Error, trustReason(status))
 	}
 }
@@ -288,14 +340,17 @@ func (in *Inspector) admin(alg string) uintptr {
 }
 
 // verifyCatalog procura o arquivo nos catálogos do sistema. Retorna o
-// caminho do catálogo, o status da verificação e se foi encontrado.
-func (in *Inspector) verifyCatalog(path string) (string, uint32, bool) {
+// caminho do catálogo, o status da verificação, o assinante e se foi
+// encontrado.
+func (in *Inspector) verifyCatalog(path string) (string, uint32, string, bool) {
 	if procCATAdminAcquireContext2.Find() != nil {
-		return "", 0, false
+		return "", 0, "", false
 	}
+	in.catMu.Lock()
+	defer in.catMu.Unlock()
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0, false
+		return "", 0, "", false
 	}
 	defer f.Close()
 
@@ -324,6 +379,11 @@ func (in *Inspector) verifyCatalog(path string) (string, uint32, bool) {
 			continue
 		}
 		catFile := windows.UTF16ToString(info.CatalogFile[:])
+		catStamp, stErr := stampFile(catFile)
+		if c, ok := in.catTrust[strings.ToLower(catFile)]; ok && stErr == nil && c.stamp == catStamp {
+			procCATAdminReleaseCatalogContext.Call(adm, ci, 0)
+			return catFile, c.status, c.signer, true
+		}
 		catP, _ := windows.UTF16PtrFromString(catFile)
 		tagP, _ := windows.UTF16PtrFromString(strings.ToUpper(hex.EncodeToString(hash)))
 		memP, _ := windows.UTF16PtrFromString(path)
@@ -338,9 +398,21 @@ func (in *Inspector) verifyCatalog(path string) (string, uint32, bool) {
 		}
 		st := winVerify(windows.WTD_CHOICE_CATALOG, unsafe.Pointer(&wci))
 		procCATAdminReleaseCatalogContext.Call(adm, ci, 0)
-		return catFile, st, true
+		signer := in.signer(catFile)
+		if stErr == nil && st == 0 {
+			// Só o sucesso fica em cache: uma falha é verificada de novo
+			// para cada arquivo, com o motivo exato.
+			in.catTrust[strings.ToLower(catFile)] = catTrust{status: st, signer: signer, stamp: catStamp}
+		}
+		return catFile, st, signer, true
 	}
-	return "", 0, false
+	return "", 0, "", false
+}
+
+func (in *Inspector) signer(path string) string {
+	t := time.Now()
+	defer in.perf.time(OpSigner, t, 0)
+	return signerFromFile(path)
 }
 
 // signerFromFile extrai o nome do assinante de um PE assinado ou de um .cat.

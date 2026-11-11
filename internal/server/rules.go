@@ -125,6 +125,7 @@ func describe(f *model.FileInfo) string {
 	if !f.Created.IsZero() {
 		parts = append(parts, "criado em "+f.Created.Local().Format("02/01/2006 15:04"))
 	}
+	parts = append(parts, describeExtra(f)...)
 	return strings.Join(parts, "; ")
 }
 
@@ -274,6 +275,7 @@ func (e *evaluator) autorun(a *model.Autorun) {
 
 	for _, f := range files {
 		e.reputation(f, "autorun", a.ID, ctx)
+		e.fileChecks(f, "autorun", a.ID, ctx, true)
 		if f != nil && f.Signature == "invalid" {
 			e.add(Finding{RuleID: "R04", Severity: SevAlta, Technique: "T1036.001",
 				Title:  "Assinatura digital inválida em arquivo de inicialização",
@@ -401,6 +403,7 @@ func (e *evaluator) process(p *model.Process, procs map[uint32]*model.Process) {
 	ctx := fmt.Sprintf("Processo %s (PID %d) em execução a partir de %s", p.Name, p.PID, p.ImagePath)
 	ref := procRef(p)
 	e.reputation(p.File, "process", ref, ctx)
+	e.fileChecks(p.File, "process", ref, ctx, false)
 
 	if p.File != nil && p.File.Signature == "invalid" {
 		e.add(Finding{RuleID: "R04", Severity: SevAlta, Technique: "T1036.001",

@@ -37,6 +37,15 @@ type FileInfo struct {
 	Description      string `json:"description,omitempty"`
 	OriginalFilename string `json:"original_filename,omitempty"`
 
+	// Atributos relevantes do arquivo: oculto, sistema, somente-leitura.
+	Attributes []string `json:"attributes,omitempty"`
+	// Origem (Mark of the Web): de onde o arquivo foi baixado, gravado pelo
+	// navegador, cliente de e-mail ou descompactador.
+	Origin *FileOrigin `json:"origin,omitempty"`
+	// Estrutura do executável. Analisada só para arquivos sem assinatura
+	// válida (os assinados já têm a integridade garantida pela assinatura).
+	PE *PEInfo `json:"pe,omitempty"`
+
 	Error string `json:"error,omitempty"`
 }
 
@@ -106,6 +115,8 @@ type Report struct {
 	Processes   []Process    `json:"processes"`
 	Connections []Connection `json:"connections"`
 	Errors      []string     `json:"errors,omitempty"`
+	// Custo de processamento da varredura (tempo por fase e por operação).
+	Perf *ScanPerf `json:"perf,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -210,4 +221,77 @@ type CommandResult struct {
 	Message string `json:"message"`
 	// Para ações reversíveis: identificador do backup / quarentena.
 	UndoID string `json:"undo_id,omitempty"`
+}
+
+// FileOrigin vem do fluxo alternativo Zone.Identifier.
+type FileOrigin struct {
+	Zone     int    `json:"zone"` // 0 local, 1 intranet, 2 confiável, 3 internet, 4 não confiável
+	ZoneName string `json:"zone_name"`
+	HostURL  string `json:"host_url,omitempty"`     // endereço do download
+	Referrer string `json:"referrer_url,omitempty"` // página de onde veio o link
+}
+
+// PEInfo resume o cabeçalho de um executável Windows (PE).
+type PEInfo struct {
+	IsPE       bool       `json:"is_pe"`
+	Machine    string     `json:"machine,omitempty"` // x64 | x86 | ARM64
+	DLL        bool       `json:"dll,omitempty"`
+	Compiled   *time.Time `json:"compiled,omitempty"` // data de compilação declarada (omitida se implausível: builds reprodutíveis gravam um hash)
+	Sections   []string   `json:"sections,omitempty"`
+	MaxEntropy float64    `json:"max_entropy"`       // maior entropia entre as seções executáveis (0 a 8)
+	Packer     string     `json:"packer,omitempty"`  // empacotador identificado (UPX, Themida...)
+	Packed     bool       `json:"packed,omitempty"`  // empacotado/cifrado (oculta o código real)
+	Overlay    int64      `json:"overlay,omitempty"` // bytes após a última seção
+}
+
+// ---------------------------------------------------------------------------
+// Custo de processamento
+
+// OpCost é o custo acumulado de uma operação (ex.: calcular SHA-256).
+type OpCost struct {
+	Count int64   `json:"count"`
+	MS    float64 `json:"ms"`
+	Bytes int64   `json:"bytes,omitempty"`
+}
+
+// SlowFile é um dos arquivos que mais demoraram para ser analisados.
+type SlowFile struct {
+	Path string  `json:"path"`
+	MS   float64 `json:"ms"`
+}
+
+// InspectPerf mede a análise de arquivos (hash, assinatura, versão...).
+type InspectPerf struct {
+	Lookups   int64             `json:"lookups"`    // pedidos de análise
+	CacheHits int64             `json:"cache_hits"` // respondidos pelo cache
+	Ops       map[string]OpCost `json:"ops"`
+	Slowest   []SlowFile        `json:"slowest,omitempty"`
+}
+
+// PhaseCost é o tempo de uma fase da varredura.
+type PhaseCost struct {
+	Phase string  `json:"phase"`
+	Count int     `json:"count"`
+	MS    float64 `json:"ms"`
+}
+
+// ScanPerf é o custo de uma varredura.
+type ScanPerf struct {
+	WallMS  float64     `json:"wall_ms"`
+	CPUMS   float64     `json:"cpu_ms"` // CPU do processo do agente durante a varredura
+	MemMB   float64     `json:"mem_mb"` // memória do agente (working set) ao final
+	Phases  []PhaseCost `json:"phases"`
+	Inspect InspectPerf `json:"inspect"`
+}
+
+// AgentPerf é o consumo do agente em tempo real, enviado periodicamente.
+type AgentPerf struct {
+	WindowS     float64     `json:"window_s"`    // período medido
+	CPUPercent  float64     `json:"cpu_percent"` // média no período (100 = 1 núcleo)
+	MemMB       float64     `json:"mem_mb"`      // working set
+	Goroutines  int         `json:"goroutines"`
+	ProcEvents  int64       `json:"proc_events"`   // execuções tratadas no período
+	NetEvents   int64       `json:"net_events"`    // conexões tratadas no período
+	EnrichAvgMS float64     `json:"enrich_avg_ms"` // tempo médio para analisar uma execução
+	Inspect     InspectPerf `json:"inspect"`
 }

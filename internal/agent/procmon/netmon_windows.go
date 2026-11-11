@@ -140,8 +140,7 @@ type seenConn struct {
 // enrichNet identifica o programa dono de cada conexão, agrupa repetições
 // e analisa o executável (assinatura, hash) com cache.
 func (m *Monitor) enrichNet(raw <-chan rawNet, out chan<- model.NetEvent) {
-	in := collect.NewInspector()
-	defer in.Close()
+	in := m.in
 	users := map[string]string{}
 	seen := map[string]*seenConn{}
 	cleanup := time.NewTicker(5 * time.Minute)
@@ -261,6 +260,7 @@ func (m *Monitor) emitNet(r rawNet, name, image string, seen map[string]*seenCon
 	if image != "" {
 		ev.File = in.Inspect(image)
 	}
+	m.netN.Add(1)
 	select {
 	case out <- ev:
 	default:

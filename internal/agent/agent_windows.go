@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -25,7 +26,7 @@ import (
 )
 
 const (
-	Version         = "0.1.0"
+	Version         = "0.2.0"
 	ServiceName     = "Sentinela"
 	DefaultInterval = 30 * time.Minute
 	pollInterval    = 30 * time.Second
@@ -289,6 +290,9 @@ type runner struct {
 	rem      *remediate.Remediator
 	mu       sync.Mutex // uma varredura/ação por vez
 	executed map[string]bool
+	// in é o analisador de arquivos compartilhado por varreduras, monitor em
+	// tempo real e remediação: um arquivo que não mudou não é lido de novo.
+	in *collect.Inspector
 }
 
 func run(stop <-chan struct{}) error {
@@ -309,13 +313,11 @@ func run(stop <-chan struct{}) error {
 	}
 	r := &runner{
 		cfg: cfg, cl: cl, executed: map[string]bool{},
-		rem: &remediate.Remediator{DataDir: DataDir(), Entries: func() []collect.Entry {
-			in := collect.NewInspector()
-			defer in.Close()
-			var errs []string
-			return collect.Persistence(in, &errs)
-		}},
 	}
+	r.rem = &remediate.Remediator{DataDir: DataDir(), Entries: func() []collect.Entry {
+		var errs []string
+		return collect.Persistence(r.in, &errs)
+	}}
 	log.Printf("Sentinela %s iniciado (agente %s, servidor %s, intervalo %s)", Version, cfg.AgentID, cfg.ServerURL, interval)
 	elevated := windows.GetCurrentProcessToken().IsElevated()
 	priv := "como administrador"
@@ -327,6 +329,10 @@ func run(stop <-chan struct{}) error {
 
 	mon := procmon.Start()
 	defer mon.Stop()
+	r.in = mon.Inspector()
+	if n, err := r.in.LoadCache(collect.CachePath(DataDir())); err == nil && n > 0 {
+		log.Printf("cache de análise de arquivos carregado: %d arquivos", n)
+	}
 	if mon.Source == "etw" {
 		r.event("procmon_started", "Monitor de execuções ativo via ETW em tempo real: "+mon.Mode, map[string]any{"source": "etw", "mode": mon.Mode})
 	} else {
@@ -339,6 +345,7 @@ func run(stop <-chan struct{}) error {
 		r.event("procmon_started", "Monitor de conexões ativo via verificação a cada 2 s ("+mon.NetReason+")", map[string]any{"source": "poll", "kind": "rede"})
 	}
 	go r.telemetryLoop(mon, stop)
+	go r.perfLoop(mon, stop)
 
 	r.scan("inicial")
 	scanT := time.NewTicker(interval)
@@ -419,11 +426,14 @@ func (r *runner) scan(trigger string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.event("scan_started", "Varredura iniciada ("+trigger+")", map[string]any{"trigger": trigger})
-	rep, _ := collect.Scan(trigger, Version, func(phase string, n int, took time.Duration) {
+	rep, _ := collect.ScanWith(r.in, trigger, Version, func(phase string, n int, took time.Duration) {
 		r.event("scan_phase", fmt.Sprintf(phaseText[phase], n, took.Seconds()),
 			map[string]any{"phase": phase, "count": n, "ms": took.Milliseconds()})
 	})
 	rep.Host.Hostname += hostSuffix
+	if err := r.in.SaveCache(collect.CachePath(DataDir())); err != nil {
+		log.Printf("salvar cache de arquivos: %v", err)
+	}
 	log.Printf("varredura %s: %d autoruns, %d processos, %d conexões em %dms",
 		trigger, len(rep.Autoruns), len(rep.Processes), len(rep.Connections), rep.DurationMS)
 	data, err := GzipReport(rep)
@@ -438,7 +448,11 @@ func (r *runner) scan(trigger string) {
 		r.event("scan_spooled", "Falha ao enviar o relatório; guardado para reenvio: "+err.Error(), nil)
 		return
 	}
-	r.event("scan_sent", fmt.Sprintf("Relatório enviado (%d KB compactado)", len(data)/1024), map[string]any{"bytes": len(data)})
+	p := rep.Perf
+	analyzed := p.Inspect.Lookups - p.Inspect.CacheHits
+	r.event("scan_sent", fmt.Sprintf("Relatório enviado (%d KB compactado). Custo: %.1f s, CPU %.1f s, %d arquivos analisados e %d reaproveitados do cache",
+		len(data)/1024, p.WallMS/1000, p.CPUMS/1000, analyzed, p.Inspect.CacheHits),
+		map[string]any{"bytes": len(data), "wall_ms": p.WallMS, "cpu_ms": p.CPUMS, "analyzed": analyzed, "cache_hits": p.Inspect.CacheHits})
 }
 
 // spool guarda relatórios não enviados (servidor fora do ar) para reenvio.
@@ -508,5 +522,36 @@ func (r *runner) poll() {
 		if res.OK {
 			r.scan("pos-remediacao")
 		}
+	}
+}
+
+// perfInterval é a frequência do relatório de consumo do agente.
+const perfInterval = 5 * time.Minute
+
+// perfLoop informa periodicamente quanto o agente consome (CPU, memória e
+// custo do monitor em tempo real), para acompanhar o impacto na máquina.
+func (r *runner) perfLoop(mon *procmon.Monitor, stop <-chan struct{}) {
+	cpu0, t0 := collect.SelfCPU(), time.Now()
+	t := time.NewTicker(perfInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+		}
+		cpu, now := collect.SelfCPU(), time.Now()
+		p := mon.Stats()
+		p.WindowS = now.Sub(t0).Seconds()
+		p.CPUPercent = 100 * (cpu - cpu0).Seconds() / p.WindowS
+		p.MemMB = collect.SelfMemMB()
+		p.Goroutines = runtime.NumGoroutine()
+		cpu0, t0 = cpu, now
+		msg := fmt.Sprintf("Consumo do agente nos últimos %.0f min: CPU %.2f%% de 1 núcleo, memória %.0f MB, %d execuções e %d conexões analisadas",
+			p.WindowS/60, p.CPUPercent, p.MemMB, p.ProcEvents, p.NetEvents)
+		if p.ProcEvents > 0 {
+			msg += fmt.Sprintf(" (%.1f ms por execução)", p.EnrichAvgMS)
+		}
+		r.event("agent_perf", msg, map[string]any{"perf": p})
 	}
 }

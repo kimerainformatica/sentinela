@@ -20,7 +20,7 @@ todas as máquinas, com registro de cada ação.
 ┌───────────────▼──────────────────────────────────┐
 │ sentinela-server.exe                             │
 │  • API dos agentes (cadastro por token)          │
-│  • Motor de regras (16 regras, MITRE ATT&CK)     │
+│  • Motor de regras (24 regras, MITRE ATT&CK)     │
 │  • VirusTotal (hash) + AbuseIPDB (IP), com cache │
 │  • Comandos assinados com Ed25519                │
 │  • SQLite · painel React embutido · auditoria    │
@@ -33,8 +33,8 @@ todas as máquinas, com registro de cada ação.
 |---|---|
 | Executar o Autoruns como administrador | Agente roda como serviço (SYSTEM) e enumera: chaves Run/RunOnce (máquina e cada usuário), pasta Inicializar (resolve atalhos `.lnk`), serviços, drivers, tarefas agendadas, Winlogon, IFEO, AppInit_DLLs e Active Setup |
 | Verificação integrada com o VirusTotal | Servidor consulta o **hash** (o arquivo nunca é enviado) com fila priorizada: primeiro autoruns sem assinatura, depois processos. Itens assinados pela Microsoft são ignorados, como o "Hide Microsoft Entries" do Autoruns |
-| Identificar entradas com detecções | Regra R01 (≥5 detecções = crítica) e mais 15 heurísticas (tabela abaixo) |
-| Verificar local, nome, fabricante, data de criação, propriedades | Cada arquivo traz SHA-256, datas, assinatura Authenticode (inclusive por catálogo do Windows), assinante, fabricante e descrição |
+| Identificar entradas com detecções | Regra R01 (≥5 detecções = crítica) e mais 23 heurísticas (tabela abaixo) |
+| Verificar local, nome, fabricante, data de criação, propriedades | Cada arquivo traz SHA-256, datas, atributos, assinatura Authenticode (inclusive por catálogo do Windows), assinante, fabricante, descrição e nome original. Além disso: **de onde foi baixado** (Mark of the Web) e, para arquivos sem assinatura, a **estrutura do executável** (data de compilação, seções, entropia e empacotadores como UPX/Themida/VMProtect) |
 | Remover as entradas maliciosas | Botões no painel: **Desativar** (com backup), **Quarentena** (arquivo codificado, restaurável), **Finalizar processo**. Tudo pode ser desfeito |
 | `netstat -ano` | Aba "Conexões de rede", com o processo dono e a reputação do IP remoto |
 | Verificação posterior | Após cada remediação o agente faz uma nova varredura sozinho. Achados que sumiram ficam "resolvidos" |
@@ -63,6 +63,11 @@ todas as máquinas, com registro de cada ação.
 | R17 | média | *(tempo real)* Programa sem assinatura **executado** de pasta do usuário (Downloads, Temp, AppData…) | T1204.002 |
 | R18 | média | *(tempo real)* Conexão para porta típica de ataque/C2 (4444, IRC, Tor…) | T1571 |
 | R19 | alta / média | *(tempo real)* Script ou utilitário do Windows conectando à internet (mshta, rundll32, wscript, certutil… / PowerShell) | T1105 |
+| R20 | alta | Programa renomeado: PowerShell, cmd, certutil… ou ferramenta de ataque (PsExec, rclone, Mimikatz, ngrok…) salvo com outro nome | T1036.003 |
+| R21 | alta | Extensão dupla (`fatura.pdf.exe`) ou caractere invisível de inversão de texto no nome | T1036.007 |
+| R22 | média | Executável oculto e sem assinatura em pasta do usuário | T1564.001 |
+| R23 | alta / média | Executável empacotado ou cifrado e sem assinatura em pasta do usuário (alta se está na inicialização) | T1027.002 |
+| R24 | alta | Inicialização automática de arquivo **baixado da internet** e sem assinatura | T1204.002 |
 
 As regras de processo (R01, R04, R05, R14, R15, R17) e de rede (R10, R11, R16, R18, R19) também rodam **no instante do evento** (veja abaixo),
 então pegam até um PowerShell que dura meio segundo. Esses achados ficam abertos até o analista marcá-los como
@@ -82,6 +87,36 @@ comando, usuário, processo pai, assinatura e hash) e **cada conexão TCP no mom
 | Usuário comum (modo `dev`) | Verificação a cada 1 s (processos) e 2 s (conexões) | O que fica aberto por mais que esse intervalo |
 
 Diagnóstico local: `sentinela-agent.exe procmon -for 30s` mostra as execuções no terminal e informa qual fonte está ativa.
+
+## Custo de processamento
+
+O agente mede o próprio custo e mostra na aba **Desempenho** de cada máquina: tempo e CPU de cada varredura,
+quanto cada operação custou (SHA-256, assinatura, catálogo do Windows, análise do executável…), quantos arquivos
+vieram do cache, os arquivos mais demorados e, a cada 5 minutos, o consumo contínuo (CPU, memória, execuções e
+conexões analisadas). No terminal: `sentinela-agent.exe bench [-n 3] [-live 30s]`.
+
+Medido numa máquina de 6 núcleos com 530 entradas de inicialização e 270 processos (como administrador):
+
+| | Custo |
+|---|---|
+| Primeira varredura (sem cache) | ~9 s, 9 s de CPU, 2,3 GB lidos (uma vez) |
+| Varreduras seguintes (a cada 30 min) | **~0,2 s**, nenhum arquivo relido |
+| Monitor em tempo real (ETW) | **~0,5% de 1 núcleo**, ~40 MB, ~1,2 ms por execução analisada |
+
+Como o custo é mantido baixo:
+
+- **Cache da análise de arquivos**, compartilhado por varreduras, tempo real e remediação, e salvo em disco
+  (`filecache.json`), então reiniciar o agente não refaz tudo. Um arquivo só é analisado de novo se mudar o
+  tamanho, a data de modificação ou o *ChangeTime* do NTFS (que denuncia um arquivo trocado com a data
+  restaurada), e todo arquivo é reverificado a cada 20–28 h.
+- **Catálogos do Windows**: a assinatura de cada `.cat` é verificada uma vez, não a cada arquivo coberto por ele.
+- **Análise do executável só onde importa**: arquivos sem assinatura válida. Lê só cabeçalhos e seções de código.
+- **Prioridade baixa**: a varredura roda numa thread em modo *background* do Windows (CPU, disco e memória com
+  prioridade baixa); o monitor em tempo real, em outras threads, não é afetado.
+- Leitura com buffer de 1 MB (SHA-256 a ~1,3 GB/s).
+
+O que ainda pesa na primeira varredura: verificação de assinatura (~35%) e busca nos catálogos do Windows (~38%,
+principalmente arquivos de terceiros que não estão em nenhum catálogo e obrigam a busca completa).
 
 ## Ver o sistema funcionando (desenvolvimento)
 

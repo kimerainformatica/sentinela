@@ -62,6 +62,9 @@ export interface FileInfo {
   product?: string;
   description?: string;
   original_filename?: string;
+  attributes?: string[];
+  origin?: { zone: number; zone_name: string; host_url?: string; referrer_url?: string };
+  pe?: { is_pe: boolean; machine?: string; dll?: boolean; compiled?: string; sections?: string[]; max_entropy: number; packer?: string; packed?: boolean; overlay?: number };
   error?: string;
 }
 
@@ -109,6 +112,39 @@ export interface Report {
   processes: Process[] | null;
   connections: Connection[] | null;
   errors?: string[];
+  perf?: ScanPerf;
+}
+
+export interface OpCost {
+  count: number;
+  ms: number;
+  bytes?: number;
+}
+
+export interface InspectPerf {
+  lookups: number;
+  cache_hits: number;
+  ops: Record<string, OpCost>;
+  slowest?: { path: string; ms: number }[];
+}
+
+export interface ScanPerf {
+  wall_ms: number;
+  cpu_ms: number;
+  mem_mb: number;
+  phases: { phase: string; count: number; ms: number }[];
+  inspect: InspectPerf;
+}
+
+export interface AgentPerf {
+  window_s: number;
+  cpu_percent: number;
+  mem_mb: number;
+  goroutines: number;
+  proc_events: number;
+  net_events: number;
+  enrich_avg_ms: number;
+  inspect: InspectPerf;
 }
 
 export interface HashRep {

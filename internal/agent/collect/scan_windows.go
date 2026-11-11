@@ -21,29 +21,44 @@ import (
 // progress (opcional) é chamado ao fim de cada fase, para acompanhamento
 // em tempo real.
 func Scan(trigger, agentVersion string, progress func(phase string, count int, took time.Duration)) (*model.Report, []Entry) {
+	in := NewInspector()
+	defer in.Close()
+	return ScanWith(in, trigger, agentVersion, progress)
+}
+
+// ScanWith usa um Inspector já existente: o agente mantém o mesmo entre
+// varreduras, e arquivos que não mudaram não são analisados de novo.
+func ScanWith(in *Inspector, trigger, agentVersion string, progress func(phase string, count int, took time.Duration)) (*model.Report, []Entry) {
 	if progress == nil {
 		progress = func(string, int, time.Duration) {}
 	}
+	// Prioridade baixa de CPU e disco: a varredura não deve atrapalhar o usuário.
+	defer Background()()
 	start := time.Now()
+	cpu0 := SelfCPU()
+	in.TakePerf() // mede só esta varredura
+	perf := &model.ScanPerf{}
+	phase := func(name string, n int, took time.Duration) {
+		perf.Phases = append(perf.Phases, model.PhaseCost{Phase: name, Count: n, MS: float64(took.Microseconds()) / 1000})
+		progress(name, n, took)
+	}
+
 	rep := &model.Report{Schema: model.SchemaVersion, CollectedAt: start.UTC(), Trigger: trigger}
 	rep.Host = Host(agentVersion)
 	if !rep.Host.IsElevated {
 		rep.Errors = append(rep.Errors, "agente sem privilégios de administrador: a coleta ficará incompleta")
 	}
 
-	in := NewInspector()
-	defer in.Close()
-
 	t := time.Now()
 	entries := Persistence(in, &rep.Errors)
 	for _, e := range entries {
 		rep.Autoruns = append(rep.Autoruns, e.Autorun)
 	}
-	progress("inicializacao", len(rep.Autoruns), time.Since(t))
+	phase("inicializacao", len(rep.Autoruns), time.Since(t))
 
 	t = time.Now()
 	rep.Processes = Processes(in, &rep.Errors)
-	progress("processos", len(rep.Processes), time.Since(t))
+	phase("processos", len(rep.Processes), time.Since(t))
 
 	t = time.Now()
 	names := map[uint32]string{}
@@ -51,9 +66,14 @@ func Scan(trigger, agentVersion string, progress func(phase string, count int, t
 		names[p.PID] = p.Name
 	}
 	rep.Connections = Connections(names, &rep.Errors)
-	progress("rede", len(rep.Connections), time.Since(t))
+	phase("rede", len(rep.Connections), time.Since(t))
 
 	rep.DurationMS = time.Since(start).Milliseconds()
+	perf.WallMS = float64(time.Since(start).Microseconds()) / 1000
+	perf.CPUMS = float64((SelfCPU() - cpu0).Microseconds()) / 1000
+	perf.MemMB = SelfMemMB()
+	perf.Inspect = in.TakePerf()
+	rep.Perf = perf
 	return rep, entries
 }
 

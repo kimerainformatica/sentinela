@@ -39,11 +39,29 @@ type Monitor struct {
 	NetEvents <-chan model.NetEvent
 
 	procs   *procCache
+	in      *collect.Inspector // compartilhado: execuções, conexões e varreduras
 	need    uint8 // partes que cada execução deve reunir (0 = processa na hora)
 	dropped atomic.Int64
 	stop    chan struct{}
 	etw     *etwSession
 	once    sync.Once
+
+	// Custo do tempo real (zerado a cada Stats).
+	procN, netN atomic.Int64
+	enrichNs    atomic.Int64
+}
+
+// Inspector devolve o analisador de arquivos do monitor, para a varredura
+// reaproveitar o mesmo cache.
+func (m *Monitor) Inspector() *collect.Inspector { return m.in }
+
+// Stats devolve o custo do monitor desde a chamada anterior.
+func (m *Monitor) Stats() model.AgentPerf {
+	p := model.AgentPerf{ProcEvents: m.procN.Swap(0), NetEvents: m.netN.Swap(0), Inspect: m.in.TakePerf()}
+	if ns := m.enrichNs.Swap(0); p.ProcEvents > 0 {
+		p.EnrichAvgMS = float64(ns) / 1e6 / float64(p.ProcEvents)
+	}
+	return p
 }
 
 // Dropped devolve (e zera) quantos eventos foram descartados por excesso.
@@ -86,7 +104,7 @@ func Start() *Monitor {
 	out := make(chan model.ProcessEvent, 4096)
 	netRaw := make(chan rawNet, 8192)
 	netOut := make(chan model.NetEvent, 4096)
-	m := &Monitor{Events: out, NetEvents: netOut, stop: make(chan struct{}), procs: newProcCache()}
+	m := &Monitor{Events: out, NetEvents: netOut, stop: make(chan struct{}), procs: newProcCache(), in: collect.NewInspector()}
 	for pid, e := range snapshot() {
 		m.procs.set(pid, e)
 	}
@@ -181,8 +199,7 @@ func imageFromCmdline(cmd string) string {
 // ainda puder informar e analisa o executável (hash, assinatura,
 // fabricante) com cache.
 func (m *Monitor) enrich(raw <-chan rawStart, out chan<- model.ProcessEvent) {
-	in := collect.NewInspector()
-	defer in.Close()
+	in := m.in
 	users := map[string]string{}
 	self := windows.GetCurrentProcessId()
 
@@ -216,6 +233,8 @@ func (m *Monitor) enrich(raw <-chan rawStart, out chan<- model.ProcessEvent) {
 	}
 
 	process := func(r rawStart) {
+		t0 := time.Now()
+		defer func() { m.procN.Add(1); m.enrichNs.Add(int64(time.Since(t0))) }()
 		p := model.Process{PID: r.pid, PPID: r.ppid}
 		ev := model.ProcessEvent{Time: r.when.UTC(), PID: r.pid, PPID: r.ppid, Source: r.source, CommandLine: r.cmdline}
 		if collect.DescribeProcess(&p, users) {

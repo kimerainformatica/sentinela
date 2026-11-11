@@ -30,6 +30,42 @@ export function SigCell({ f }: { f?: FileInfo }) {
       </span>
       {f.signer && <div className="small">{f.signer}</div>}
       {f.company && f.company !== f.signer && <div className="small muted">Fabricante: {f.company}</div>}
+      <FileFlags f={f} />
+    </div>
+  );
+}
+
+/** Nome do arquivo no disco difere do nome original gravado nele? */
+function renamed(f: FileInfo): string | null {
+  const orig = (f.original_filename ?? "").trim().toLowerCase().replace(/\.mui$/, "");
+  if (!orig) return null;
+  const disk = (f.path.split("\\").pop() ?? "").toLowerCase();
+  const stem = (s: string) => s.replace(/\.[^.]*$/, "");
+  const d = stem(disk), o = stem(orig);
+  return d === o || d.startsWith(o + "64") || d.startsWith(o + "_") ? null : f.original_filename!;
+}
+
+/** Sinais da análise aprofundada: origem, empacotamento, atributos, nome. */
+export function FileFlags({ f }: { f?: FileInfo }) {
+  if (!f?.exists) return null;
+  const flags: { cls: string; text: string; title: string }[] = [];
+  if (f.origin && f.origin.zone >= 3)
+    flags.push({ cls: "flag-warn", text: "Baixado da " + f.origin.zone_name, title: f.origin.host_url ?? "Mark of the Web (Zone.Identifier)" });
+  if (f.pe && !f.pe.is_pe && /\.(exe|dll|scr|sys)$/i.test(f.path))
+    flags.push({ cls: "flag-bad", text: "Não é executável", title: "A extensão diz executável, mas o conteúdo não é um programa Windows" });
+  if (f.pe?.packed)
+    flags.push({ cls: "flag-bad", text: f.pe.packer ? "Empacotado (" + f.pe.packer + ")" : "Código cifrado", title: "Entropia " + f.pe.max_entropy.toFixed(2) + " de 8" });
+  if (f.attributes?.includes("oculto")) flags.push({ cls: "flag-warn", text: "Oculto", title: (f.attributes ?? []).join(", ") });
+  const r = renamed(f);
+  if (r) flags.push({ cls: "flag-warn", text: "Nome original: " + r, title: "Nome gravado no recurso de versão do arquivo" });
+  if (!flags.length) return null;
+  return (
+    <div className="flags">
+      {flags.map((x) => (
+        <span key={x.text} className={`flag ${x.cls}`} title={x.title}>
+          {x.text}
+        </span>
+      ))}
     </div>
   );
 }
@@ -72,6 +108,14 @@ export function FileDetails({ f }: { f?: FileInfo }) {
     <div className="small muted">
       {f.description && <div>{f.description}</div>}
       {f.created && <div>Criado em {fmtTime(f.created)}</div>}
+      {f.origin?.host_url && <div className="break">Baixado de {f.origin.host_url}</div>}
+      {f.pe?.is_pe && (
+        <div>
+          Executável {f.pe.machine}
+          {f.pe.dll ? " (DLL)" : ""}
+          {f.pe.compiled ? ", compilado em " + fmtTime(f.pe.compiled) : ""}, entropia {f.pe.max_entropy.toFixed(2)}
+        </div>
+      )}
       {f.sha256 && <div className="mono break">SHA-256 {f.sha256}</div>}
     </div>
   );

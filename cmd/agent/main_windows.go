@@ -30,6 +30,7 @@ func usage() {
   sentinela-agent uninstall
   sentinela-agent run
   sentinela-agent procmon [-for 30s]   mostra as execuções de programas em tempo real
+  sentinela-agent bench [-n 3] [-live 30s]   mede o custo de processamento de cada parte
   sentinela-agent dev -token TOKEN -fingerprint SHA256 [-server URL] [-interval 2m]
       (desenvolvimento: roda em primeiro plano, sem serviço e sem exigir admin)`)
 	os.Exit(2)
@@ -57,6 +58,8 @@ func main() {
 		if err := agent.RunForeground(); err != nil {
 			fatal(err)
 		}
+	case "bench":
+		cmdBench(os.Args[2:])
 	case "procmon":
 		cmdProcmon(os.Args[2:])
 	case "dev":

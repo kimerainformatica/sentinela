@@ -148,6 +148,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		where += " AND agent_id=?"
 		args = append(args, a)
 	}
+	if k := q.Get("kind"); k != "" {
+		where += " AND kind=?"
+		args = append(args, k)
+	}
 	if b, err := strconv.ParseInt(q.Get("before"), 10, 64); err == nil && b > 0 {
 		where += " AND id<?"
 		args = append(args, b)
@@ -229,6 +233,7 @@ var agentEventKinds = map[string]string{
 	"command_received":  LvlInfo,
 	"command_rejected":  LvlCrit,
 	"command_executing": LvlInfo,
+	"agent_perf":        LvlInfo,
 }
 
 type agentEventReq struct {
