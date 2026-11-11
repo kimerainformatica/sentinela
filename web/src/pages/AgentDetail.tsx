@@ -5,11 +5,12 @@ import type { Agent, Command, Finding, Scan, Snapshot } from "../types";
 import { TRIGGER_LABEL, ago, fmtTime, isMicrosoft, usePoll } from "../util";
 import { FindingCard } from "./Findings";
 import { PerfTab } from "./PerfTab";
+import { ProtectionTab } from "./ProtectionTab";
 import { useLiveEvents, useLiveRefresh, useLiveStatus } from "../live";
 import { LiveFeed, StatusPill } from "../LiveFeed";
 import { ActionsTab, AutorunsTab, DisableAutorunButton, ExecutionsTab, KillButton, NetLiveTab, NetworkTab, ProcessesTab, QuarantineButton, type SendFn } from "./AgentTabs";
 
-type Tab = "achados" | "execucoes" | "rede-tr" | "inicializacao" | "processos" | "rede" | "acoes" | "desempenho";
+type Tab = "achados" | "execucoes" | "rede-tr" | "inicializacao" | "processos" | "rede" | "protecao" | "acoes" | "desempenho";
 
 type StepState = "done" | "warn" | "bad" | "todo";
 interface Step {
@@ -160,6 +161,7 @@ export default function AgentDetail({ id }: { id: string }) {
     ["inicializacao", "Inicialização automática", autoruns.length],
     ["processos", "Processos", procs.length],
     ["rede", "Conexões (última varredura)", (s?.report.connections ?? []).filter((c) => c.state === "ESTABLISHED").length],
+    ["protecao", "Proteção DDoS", null],
     ["acoes", "Ações e verificação", (commands.data ?? []).length],
     ["desempenho", "Desempenho", null],
   ];
@@ -303,6 +305,7 @@ export default function AgentDetail({ id }: { id: string }) {
       {s && tab === "inicializacao" && <AutorunsTab snap={s} findings={allF} send={send} />}
       {s && tab === "processos" && <ProcessesTab snap={s} findings={allF} send={send} />}
       {s && tab === "rede" && <NetworkTab snap={s} findings={allF} send={send} />}
+      {tab === "protecao" && <ProtectionTab agentId={id} send={send} />}
       {tab === "desempenho" && <PerfTab agentId={id} perf={s?.report.perf} when={s?.report.collected_at} />}
       {tab === "acoes" && <ActionsTab commands={commands.data ?? []} scans={info.data?.scans ?? []} send={send} autoruns={autoruns} />}
 

@@ -138,6 +138,15 @@ CREATE TABLE IF NOT EXISTS net_events(
 );
 CREATE INDEX IF NOT EXISTS net_events_agent ON net_events(agent_id, id);
 CREATE INDEX IF NOT EXISTS net_events_raddr ON net_events(raddr);
+
+-- IPs bloqueados no firewall em resposta a DDoS de entrada.
+CREATE TABLE IF NOT EXISTS ddos_blocks(
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  ip TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL DEFAULT '', removed_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(agent_id, ip)
+);
 `
 
 // Migrações para bancos criados por versões anteriores. Erros de "coluna

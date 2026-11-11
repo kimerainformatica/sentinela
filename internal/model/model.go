@@ -198,6 +198,10 @@ const (
 	ActionRestoreAutorun = "restore_autorun"
 	ActionQuarantineFile = "quarantine_file"
 	ActionRestoreFile    = "restore_file"
+	// Resposta a DDoS.
+	ActionBlockIP       = "block_ip"       // bloqueia um IP no Firewall do Windows
+	ActionUnblockIP     = "unblock_ip"     // remove o bloqueio de um IP
+	ActionSetProtection = "set_protection" // liga/desliga a resposta automática
 )
 
 // Command é assinado pelo servidor. Payload contém o JSON canônico de
@@ -221,6 +225,50 @@ type CommandResult struct {
 	Message string `json:"message"`
 	// Para ações reversíveis: identificador do backup / quarentena.
 	UndoID string `json:"undo_id,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Detecção e resposta a DDoS (enxurrada de conexões em tempo real)
+
+// SourceCount é uma origem (IP) e quantas conexões ela abriu na janela.
+type SourceCount struct {
+	IP    string `json:"ip"`
+	Count int    `json:"count"`
+}
+
+// FloodIncident descreve uma enxurrada de conexões TCP identificada pelo
+// agente: a máquina atacando (saída) ou sendo atacada (entrada).
+type FloodIncident struct {
+	Time      time.Time     `json:"time"`
+	Direction string        `json:"direction"` // saida | entrada
+	Reason    string        `json:"reason"`    // alvo | espalhada | volume | entrada
+	PID       uint32        `json:"pid,omitempty"`
+	Image     string        `json:"image,omitempty"`
+	WindowS   float64       `json:"window_s"`
+	Count     int           `json:"count"`           // conexões na janela
+	Distinct  int           `json:"distinct"`        // destinos (saída) ou origens (entrada) distintos
+	Target    string        `json:"target,omitempty"` // IP da vítima (saída a um alvo)
+	LocalPort uint16        `json:"local_port,omitempty"` // porta sob ataque (entrada)
+	Sources   []SourceCount `json:"sources,omitempty"`    // origens que mais conectaram (entrada)
+}
+
+// IncidentReport é o que o agente envia ao servidor: o incidente e o que foi
+// feito a respeito (finalizar processo, bloquear IPs ou apenas alertar).
+type IncidentReport struct {
+	Incident   FloodIncident `json:"incident"`
+	Mitigated  bool          `json:"mitigated"`
+	Action     string        `json:"action"`  // kill | block | alerta
+	Outcome    string        `json:"outcome"` // resultado textual
+	KilledPID  uint32        `json:"killed_pid,omitempty"`
+	BlockedIPs []string      `json:"blocked_ips,omitempty"`
+}
+
+// FirewallBlock é um bloqueio de IP ativo no Firewall do Windows.
+type FirewallBlock struct {
+	IP      string    `json:"ip"`
+	Created time.Time `json:"created"`
+	Expires time.Time `json:"expires"`
+	Reason  string    `json:"reason,omitempty"`
 }
 
 // FileOrigin vem do fluxo alternativo Zone.Identifier.

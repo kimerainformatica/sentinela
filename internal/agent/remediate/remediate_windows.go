@@ -48,6 +48,9 @@ type Remediator struct {
 	// Entries reenumera as entradas de inicialização (a remediação sempre
 	// age sobre o estado atual, nunca sobre um snapshot antigo).
 	Entries func() []collect.Entry
+	// ProtectIPs nunca são bloqueados no firewall (o servidor e a própria
+	// máquina), para a resposta a DDoS não cortar o canal de gerência.
+	ProtectIPs []string
 }
 
 type backup struct {
@@ -109,6 +112,10 @@ func (r *Remediator) Execute(p model.CommandPayload) model.CommandResult {
 		res = r.quarantine(p.Params["path"], p.Params["sha256"])
 	case model.ActionRestoreFile:
 		res = r.restoreFile(p.Params["quarantine_id"])
+	case model.ActionBlockIP:
+		res = r.blockIP(p.Params["ip"], p.Params["minutes"], p.Params["reason"])
+	case model.ActionUnblockIP:
+		res = r.unblockIP(p.Params["ip"])
 	default:
 		res = fail(fmt.Errorf("ação não permitida: %q", p.Action))
 	}

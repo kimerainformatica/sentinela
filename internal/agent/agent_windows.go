@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -40,6 +42,19 @@ type Config struct {
 	Secret        string `json:"secret"`
 	CommandPubKey string `json:"command_pubkey"`
 	Interval      string `json:"interval"`
+	// AutoMitigate liga a resposta automática a DDoS (finalizar o processo
+	// atacante, bloquear IPs atacantes). Ausente = ligado.
+	AutoMitigate *bool `json:"auto_mitigate,omitempty"`
+}
+
+func (c *Config) autoMitigate() bool { return c.AutoMitigate == nil || *c.AutoMitigate }
+
+func saveConfig(c *Config) error {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath(), data, 0o600)
 }
 
 // dataDir é C:\ProgramData\Sentinela na instalação normal, ou uma pasta do
@@ -293,6 +308,9 @@ type runner struct {
 	// in é o analisador de arquivos compartilhado por varreduras, monitor em
 	// tempo real e remediação: um arquivo que não mudou não é lido de novo.
 	in *collect.Inspector
+	// protect liga a resposta automática a DDoS (pode ser desligada pelo
+	// painel com o comando set_protection).
+	protect atomic.Bool
 }
 
 func run(stop <-chan struct{}) error {
@@ -314,10 +332,11 @@ func run(stop <-chan struct{}) error {
 	r := &runner{
 		cfg: cfg, cl: cl, executed: map[string]bool{},
 	}
+	r.protect.Store(cfg.autoMitigate())
 	r.rem = &remediate.Remediator{DataDir: DataDir(), Entries: func() []collect.Entry {
 		var errs []string
 		return collect.Persistence(r.in, &errs)
-	}}
+	}, ProtectIPs: protectedIPs(cfg.ServerURL)}
 	log.Printf("Sentinela %s iniciado (agente %s, servidor %s, intervalo %s)", Version, cfg.AgentID, cfg.ServerURL, interval)
 	elevated := windows.GetCurrentProcessToken().IsElevated()
 	priv := "como administrador"
@@ -325,7 +344,7 @@ func run(stop <-chan struct{}) error {
 		priv = "SEM privilégios de administrador (coleta parcial)"
 	}
 	r.event("agent_started", fmt.Sprintf("Agente %s iniciado %s; varredura a cada %s", Version, priv, interval),
-		map[string]any{"version": Version, "elevated": elevated, "interval": interval.String()})
+		map[string]any{"version": Version, "elevated": elevated, "interval": interval.String(), "protect": r.protect.Load()})
 
 	mon := procmon.Start()
 	defer mon.Stop()
@@ -344,8 +363,14 @@ func run(stop <-chan struct{}) error {
 	} else {
 		r.event("procmon_started", "Monitor de conexões ativo via verificação a cada 2 s ("+mon.NetReason+")", map[string]any{"source": "poll", "kind": "rede"})
 	}
+	msg := "Resposta automática a DDoS LIGADA: a máquina finaliza o processo atacante (saída) e bloqueia IPs atacantes (entrada)."
+	if !r.protect.Load() {
+		msg = "Resposta automática a DDoS DESLIGADA: ataques são apenas detectados e alertados."
+	}
+	r.event("protection", msg, map[string]any{"protect": r.protect.Load()})
 	go r.telemetryLoop(mon, stop)
 	go r.perfLoop(mon, stop)
+	go r.mitigationLoop(mon, stop)
 
 	r.scan("inicial")
 	scanT := time.NewTicker(interval)
@@ -510,10 +535,27 @@ func (r *runner) poll() {
 			r.scan("manual")
 			continue
 		}
+		if p.Action == model.ActionSetProtection {
+			r.setProtection(p.Params["enabled"] == "1")
+			r.cl.SendResult(p.ID, model.CommandResult{OK: true, Message: "resposta automática " + onOff(r.protect.Load())})
+			continue
+		}
 		r.mu.Lock()
 		res := r.rem.Execute(*p)
 		r.mu.Unlock()
 		log.Printf("resultado %s: ok=%v %s", p.ID, res.OK, res.Message)
+		// Mantém o servidor a par dos bloqueios de firewall feitos pelo painel.
+		if res.OK && p.Action == model.ActionBlockIP {
+			mins := 60
+			if m, err := strconv.Atoi(p.Params["minutes"]); err == nil && m > 0 {
+				mins = m
+			}
+			r.event("ddos_block", "IP "+p.Params["ip"]+" bloqueado no firewall (manual)",
+				map[string]any{"ip": p.Params["ip"], "reason": "manual", "expires": time.Now().Add(time.Duration(mins) * time.Minute).Unix()})
+		}
+		if res.OK && p.Action == model.ActionUnblockIP {
+			r.event("ddos_unblock", "IP "+p.Params["ip"]+" desbloqueado (manual)", map[string]any{"ip": p.Params["ip"]})
+		}
 		if err := r.cl.SendResult(p.ID, res); err != nil {
 			log.Printf("enviar resultado: %v", err)
 		}

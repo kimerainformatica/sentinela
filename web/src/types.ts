@@ -147,6 +147,13 @@ export interface AgentPerf {
   inspect: InspectPerf;
 }
 
+export interface FloodBlock {
+  ip: string;
+  created: number;
+  expires: number;
+  reason: string;
+}
+
 export interface HashRep {
   status: "pending" | "known" | "unknown" | "error";
   malicious: number;

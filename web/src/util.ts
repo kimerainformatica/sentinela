@@ -30,6 +30,9 @@ export const ACTION_LABEL: Record<string, string> = {
   restore_autorun: "Restaurar inicialização",
   quarantine_file: "Quarentena de arquivo",
   restore_file: "Restaurar da quarentena",
+  block_ip: "Bloquear IP no firewall",
+  unblock_ip: "Desbloquear IP",
+  set_protection: "Resposta automática a DDoS",
 };
 
 export function fmtTime(unix: number | string | undefined): string {

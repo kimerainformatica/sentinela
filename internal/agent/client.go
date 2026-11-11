@@ -164,6 +164,13 @@ func (c *Client) SendResult(id string, res model.CommandResult) error {
 	return c.do("POST", "/agent/v1/commands/"+id+"/result", jsonBody(res), false, nil)
 }
 
+// SendIncident relata um DDoS detectado (e o que foi feito) ao servidor.
+func (c *Client) SendIncident(rep model.IncidentReport) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return c.doCtx(ctx, "POST", "/agent/v1/incident", jsonBody(rep), false, nil)
+}
+
 // Verify valida a assinatura e a validade de um comando recebido.
 func (c *Client) Verify(cmd model.Command) (*model.CommandPayload, error) {
 	sig, err := base64.StdEncoding.DecodeString(cmd.Signature)

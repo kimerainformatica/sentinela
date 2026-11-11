@@ -28,6 +28,7 @@ func (s *Server) agentRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /agent/v1/commands/{id}/result", s.agentAuth(http.HandlerFunc(s.handleCommandResult)))
 	mux.Handle("POST /agent/v1/events", s.agentAuth(http.HandlerFunc(s.handleAgentEvent)))
 	mux.Handle("POST /agent/v1/telemetry", s.agentAuth(http.HandlerFunc(s.handleTelemetry)))
+	mux.Handle("POST /agent/v1/incident", s.agentAuth(http.HandlerFunc(s.handleIncident)))
 }
 
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +185,8 @@ var actionNames = map[string]string{
 	model.ActionRescan: "Nova varredura", model.ActionKillProcess: "Finalizar processo",
 	model.ActionDisableAutorun: "Desativar inicialização", model.ActionRestoreAutorun: "Restaurar inicialização",
 	model.ActionQuarantineFile: "Quarentena de arquivo", model.ActionRestoreFile: "Restaurar da quarentena",
+	model.ActionBlockIP: "Bloquear IP no firewall", model.ActionUnblockIP: "Desbloquear IP",
+	model.ActionSetProtection: "Resposta automática a DDoS",
 }
 
 func actionText(a string) string {

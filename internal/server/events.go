@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -234,6 +235,9 @@ var agentEventKinds = map[string]string{
 	"command_rejected":  LvlCrit,
 	"command_executing": LvlInfo,
 	"agent_perf":        LvlInfo,
+	"protection":        LvlInfo,
+	"ddos_block":        LvlWarn,
+	"ddos_unblock":      LvlOK,
 }
 
 type agentEventReq struct {
@@ -259,10 +263,27 @@ func (s *Server) handleAgentEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cat := CatAgent
-	if len(req.Kind) > 5 && req.Kind[:5] == "scan_" {
+	switch {
+	case strings.HasPrefix(req.Kind, "scan_"):
 		cat = CatScan
-	} else if len(req.Kind) > 8 && req.Kind[:8] == "command_" {
+	case strings.HasPrefix(req.Kind, "command_"):
 		cat = CatCommand
+	case strings.HasPrefix(req.Kind, "ddos_") || req.Kind == "protection":
+		cat = CatNetwork
+	}
+	// Mantém a lista de bloqueios de firewall em dia (auto e manuais).
+	if ip, _ := req.Data["ip"].(string); ip != "" {
+		switch req.Kind {
+		case "ddos_block":
+			reason, _ := req.Data["reason"].(string)
+			expires := time.Now().Add(time.Hour)
+			if e, ok := req.Data["expires"].(float64); ok && e > 0 {
+				expires = time.Unix(int64(e), 0)
+			}
+			s.upsertBlock(id, ip, reason, expires)
+		case "ddos_unblock":
+			s.removeBlock(id, ip)
+		}
 	}
 	s.emit(Event{Category: cat, Kind: req.Kind, Level: lvl, AgentID: id, Message: truncate(req.Message, 500), Data: req.Data})
 	w.WriteHeader(204)

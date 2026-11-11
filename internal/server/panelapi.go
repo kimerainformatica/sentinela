@@ -36,6 +36,7 @@ func (s *Server) panelRoutes(mux *http.ServeMux) {
 	h("GET /api/agents/{id}/snapshot", s.handleSnapshot)
 	h("GET /api/agents/{id}/executions", s.handleExecutions)
 	h("GET /api/agents/{id}/net-events", s.handleNetEvents)
+	h("GET /api/agents/{id}/blocks", s.handleBlocks)
 	h("GET /api/agents/{id}/commands", s.handleListCommands)
 	h("POST /api/agents/{id}/commands", s.handleCreateCommand)
 	h("POST /api/agents/{id}/clear-compromise", s.handleClearCompromise)
@@ -360,6 +361,23 @@ func validateCommand(action string, p map[string]string) error {
 	case model.ActionRestoreFile:
 		allowed = []string{"quarantine_id"}
 		err = need("quarantine_id", hex16Re)
+	case model.ActionBlockIP:
+		allowed = []string{"ip", "minutes", "reason"}
+		if net.ParseIP(p["ip"]) == nil {
+			err = fmt.Errorf("parâmetro %q inválido", "ip")
+		} else if p["minutes"] != "" && !digitRe.MatchString(p["minutes"]) {
+			err = fmt.Errorf("parâmetro %q inválido", "minutes")
+		}
+	case model.ActionUnblockIP:
+		allowed = []string{"ip"}
+		if net.ParseIP(p["ip"]) == nil {
+			err = fmt.Errorf("parâmetro %q inválido", "ip")
+		}
+	case model.ActionSetProtection:
+		allowed = []string{"enabled"}
+		if p["enabled"] != "0" && p["enabled"] != "1" {
+			err = fmt.Errorf("parâmetro %q inválido", "enabled")
+		}
 	default:
 		return fmt.Errorf("ação não permitida: %q", action)
 	}

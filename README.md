@@ -20,7 +20,7 @@ todas as máquinas, com registro de cada ação.
 ┌───────────────▼──────────────────────────────────┐
 │ sentinela-server.exe                             │
 │  • API dos agentes (cadastro por token)          │
-│  • Motor de regras (24 regras, MITRE ATT&CK)     │
+│  • Motor de regras (26 regras, MITRE ATT&CK)     │
 │  • VirusTotal (hash) + AbuseIPDB (IP), com cache │
 │  • Comandos assinados com Ed25519                │
 │  • SQLite · painel React embutido · auditoria    │
@@ -68,10 +68,41 @@ todas as máquinas, com registro de cada ação.
 | R22 | média | Executável oculto e sem assinatura em pasta do usuário | T1564.001 |
 | R23 | alta / média | Executável empacotado ou cifrado e sem assinatura em pasta do usuário (alta se está na inicialização) | T1027.002 |
 | R24 | alta | Inicialização automática de arquivo **baixado da internet** e sem assinatura | T1204.002 |
+| R25 | crítica | *(tempo real)* **DDoS de saída**: a máquina está inundando uma vítima de conexões (virou bot) | T1498.001 |
+| R26 | alta | *(tempo real)* **DDoS de entrada**: avalanche de conexões chega a uma porta da máquina | T1499 |
 
 As regras de processo (R01, R04, R05, R14, R15, R17) e de rede (R10, R11, R16, R18, R19) também rodam **no instante do evento** (veja abaixo),
 então pegam até um PowerShell que dura meio segundo. Esses achados ficam abertos até o analista marcá-los como
 resolvidos, já que o processo pode não existir mais na varredura seguinte.
+
+## Detecção e resposta a DDoS
+
+O agente observa **cada conexão TCP no instante em que ela acontece** (o mesmo ETW das execuções) e mantém
+contadores por processo e por porta numa janela curta. Quando vira uma avalanche, ele **age sozinho**, sem esperar
+um analista — é o "identifica e interrompe":
+
+| Lado | O que é | Resposta automática |
+|---|---|---|
+| **Saída** | Um processo abre centenas de conexões num piscar de olhos (a máquina virou bot e está atacando) | **Finaliza o processo** atacante (R25, máquina marcada como comprometida) |
+| **Entrada** | Uma enxurrada de conexões chega a uma porta da máquina (a máquina é a vítima) | **Bloqueia no Firewall do Windows** os IPs que mais atacam (R26), bloqueio reversível e que expira sozinho |
+
+Limites padrão (janela de 10 s, ajustáveis no código): 300 conexões ao mesmo destino, 150 destinos distintos ou
+800 conexões no total (saída); 400 conexões a uma porta, com bloqueio dos IPs que passam de 80 conexões (entrada).
+São altos de propósito: navegador, sincronização e torrent espalham-se por muitos destinos com poucas conexões
+cada, enquanto um DDoS concentra um volume alto num intervalo curto.
+
+**Travas de segurança** (o agente roda como SYSTEM e age sozinho):
+
+- Nunca finaliza processos críticos do Windows; para programas **assinados** que se espalham (possível P2P), só alerta.
+- Nunca bloqueia o IP do servidor nem os da própria máquina (não corta o canal de gerência).
+- Bloqueios de firewall são **reversíveis** (botão no painel) e **expiram** (1 h por padrão).
+- Um ataque distribuído por milhares de origens leves é **alertado**, mas não gera bloqueio (não há IP concentrado
+  para bloquear, e bloquear a porta inteira seria negar o serviço a todos).
+- A resposta automática pode ser **desligada pelo painel** (aba *Proteção DDoS*): aí os ataques são só detectados
+  e alertados. Cada incidente e cada bloqueio ficam na auditoria.
+
+Monitora TCP; floods de **UDP** (amplificação) e **SYN** puro (sem completar a conexão) ainda não são vistos —
+próximo passo, junto com o ETW de UDP.
 
 ## Execuções e conexões em tempo real
 
@@ -176,13 +207,13 @@ O agente roda como SYSTEM, então o canal de comandos é o alvo mais valioso. Po
 - **TLS com pinning**: o agente só aceita o certificado cuja impressão digital SHA-256 foi informada na instalação (impede ataque man-in-the-middle mesmo com certificado autoassinado).
 - **Credencial por agente**: segredo aleatório de 256 bits; o servidor guarda só o hash.
 - **Comandos assinados com Ed25519**: com ID do agente de destino e validade de 1 hora. O agente rejeita assinatura inválida, comando de outro agente, comando expirado e comando repetido.
-- **Allowlist de ações** no servidor e no agente: só existem `rescan`, `kill_process`, `disable_autorun`, `restore_autorun`, `quarantine_file` e `restore_file`. Não há execução de comandos arbitrários.
+- **Allowlist de ações** no servidor e no agente: só existem `rescan`, `kill_process`, `disable_autorun`, `restore_autorun`, `quarantine_file`, `restore_file`, `block_ip`, `unblock_ip` e `set_protection`. Não há execução de comandos arbitrários.
 - **Travas no agente**: confere o caminho do processo antes de finalizar (evita reuso de PID), recusa finalizar processos críticos do Windows, confere o hash do arquivo antes da quarentena e recusa colocar em quarentena arquivos assinados pela Microsoft.
 - **Painel**: senha com PBKDF2-SHA256 (600 mil iterações), cookie `HttpOnly`/`Secure`/`SameSite=Strict`, cabeçalho anti-CSRF, bloqueio após 5 tentativas, CSP, e auditoria de cada login e cada comando.
 
 ## Limitações conhecidas (próximos passos)
 
-1. **Tempo real para processos e conexões TCP.** Persistência (registro, tarefas) e arquivos ainda são vistos apenas nas varreduras periódicas; UDP/DNS não são monitorados. Próximo passo: ETW de registro e de DNS. Sem administrador, processos e conexões muito curtos podem escapar.
+1. **Tempo real para processos e conexões TCP** (inclui a detecção de DDoS). Persistência (registro, tarefas) e arquivos ainda são vistos apenas nas varreduras periódicas; UDP/DNS não são monitorados, então floods de UDP e SYN puro escapam. Próximo passo: ETW de registro, de UDP e de DNS. Sem administrador, processos e conexões muito curtos podem escapar.
 2. **Persistência ainda não coberta**: assinaturas WMI, extensões do Explorer, COM hijacking, hives de usuários deslogados.
 3. **Um único usuário (admin)**. Próximo passo: múltiplos usuários com papéis (leitura / analista / admin).
 4. **SQLite** atende algumas dezenas de máquinas com snapshots. Com telemetria em tempo real (item 1), migrar os eventos para ClickHouse.

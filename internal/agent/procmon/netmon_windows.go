@@ -221,12 +221,40 @@ func (m *Monitor) enrichNet(raw <-chan rawNet, out chan<- model.NetEvent) {
 		if ignorableAddr(r.raddr) {
 			continue
 		}
+		// Detecção de DDoS: conta toda conexão antes do agrupamento. Durante
+		// uma enxurrada já sinalizada, suppress evita inundar a telemetria.
+		if inc, suppress := m.observeFlood(r); suppress {
+			if inc != nil {
+				select {
+				case m.incidents <- *inc:
+				default:
+				}
+			}
+			continue
+		}
 		if name, image = owner(r.pid); name == "" && len(waiting) < 2000 {
 			waiting = append(waiting, waitingConn{r: r, since: time.Now()})
 			continue
 		}
 		m.emitNet(r, name, image, seen, in, out)
 	}
+}
+
+// observeFlood alimenta o detector de DDoS com uma conexão e completa o
+// incidente (quando há) com o programa dono do PID.
+func (m *Monitor) observeFlood(r rawNet) (*model.FloodIncident, bool) {
+	if r.dir != "entrada" && r.pid == m.self {
+		return nil, false // a própria telemetria do agente não é um ataque
+	}
+	inc, suppress := m.flood.observe(r.dir, r.pid, r.raddr, r.lport, r.when)
+	if inc != nil && inc.Image == "" {
+		if e, ok := m.procs.get(r.pid); ok {
+			if inc.Image = e.image; inc.Image == "" {
+				inc.Image = e.name
+			}
+		}
+	}
+	return inc, suppress
 }
 
 // ownerWait é quanto uma conexão espera o monitor de execuções informar

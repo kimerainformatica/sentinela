@@ -38,6 +38,12 @@ type Monitor struct {
 	NetReason string // por que a rede não usa ETW
 	NetEvents <-chan model.NetEvent
 
+	// Incidentes de DDoS (enxurrada de conexões) detectados em tempo real.
+	Incidents <-chan model.FloodIncident
+	incidents chan model.FloodIncident
+	flood     *floodDetector
+	self      uint32
+
 	procs   *procCache
 	in      *collect.Inspector // compartilhado: execuções, conexões e varreduras
 	need    uint8 // partes que cada execução deve reunir (0 = processa na hora)
@@ -104,7 +110,10 @@ func Start() *Monitor {
 	out := make(chan model.ProcessEvent, 4096)
 	netRaw := make(chan rawNet, 8192)
 	netOut := make(chan model.NetEvent, 4096)
-	m := &Monitor{Events: out, NetEvents: netOut, stop: make(chan struct{}), procs: newProcCache(), in: collect.NewInspector()}
+	incidents := make(chan model.FloodIncident, 64)
+	m := &Monitor{Events: out, NetEvents: netOut, Incidents: incidents, incidents: incidents,
+		flood: newFloodDetector(DefaultFloodConfig()), self: windows.GetCurrentProcessId(),
+		stop: make(chan struct{}), procs: newProcCache(), in: collect.NewInspector()}
 	for pid, e := range snapshot() {
 		m.procs.set(pid, e)
 	}
